@@ -216,6 +216,7 @@ type file struct {
 	name string
 	data string
 	hash [16]byte // truncated SHA256 hash
+	mode uint64
 }
 
 var (
@@ -235,7 +236,7 @@ func (f *file) Mode() fs.FileMode {
 	if f.IsDir() {
 		return fs.ModeDir | 0555
 	}
-	return 0444
+	return fs.FileMode(f.mode)
 }
 
 // dotFile is a file for the root directory,

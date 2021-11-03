@@ -103,27 +103,28 @@ const maxFileSize = int64(2e9)
 // for use as the backing store of a []byte.
 // The content hash of file is copied into hash. (If hash is nil, nothing is copied.)
 // The returned symbol contains the data itself, not a string header.
-func fileStringSym(pos src.XPos, file string, readonly bool, hash []byte) (*obj.LSym, int64, error) {
+func fileStringSym(pos src.XPos, file string, readonly bool, hash []byte) (*obj.LSym, int64, uint32, error) {
 	f, err := os.Open(file)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
+	mode := uint32(info.Mode())
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, 0, fmt.Errorf("not a regular file")
+		return nil, 0, 0, fmt.Errorf("not a regular file")
 	}
 	size := info.Size()
 	if size <= 1*1024 {
 		data, err := ioutil.ReadAll(f)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		if int64(len(data)) != size {
-			return nil, 0, fmt.Errorf("file changed between reads")
+			return nil, 0, 0, fmt.Errorf("file changed between reads")
 		}
 		var sym *obj.LSym
 		if readonly {
@@ -135,14 +136,14 @@ func fileStringSym(pos src.XPos, file string, readonly bool, hash []byte) (*obj.
 			sum := sha256.Sum256(data)
 			copy(hash, sum[:])
 		}
-		return sym, size, nil
+		return sym, size, mode, nil
 	}
 	if size > maxFileSize {
 		// ggloblsym takes an int32,
 		// and probably the rest of the toolchain
 		// can't handle such big symbols either.
 		// See golang.org/issue/9862.
-		return nil, 0, fmt.Errorf("file too large (%d bytes > %d bytes)", size, maxFileSize)
+		return nil, 0, 0, fmt.Errorf("file too large (%d bytes > %d bytes)", size, maxFileSize)
 	}
 
 	// File is too big to read and keep in memory.
@@ -152,10 +153,10 @@ func fileStringSym(pos src.XPos, file string, readonly bool, hash []byte) (*obj.
 		h := sha256.New()
 		n, err := io.Copy(h, f)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		if n != size {
-			return nil, 0, fmt.Errorf("file changed between reads")
+			return nil, 0, 0, fmt.Errorf("file changed between reads")
 		}
 		sum = h.Sum(nil)
 		copy(hash, sum)
@@ -185,7 +186,7 @@ func fileStringSym(pos src.XPos, file string, readonly bool, hash []byte) (*obj.
 		info.Size = size
 	}
 
-	return symdata, size, nil
+	return symdata, size, mode, nil
 }
 
 var slicedataGen int

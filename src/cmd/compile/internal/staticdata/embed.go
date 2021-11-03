@@ -122,7 +122,7 @@ func WriteEmbed(v *ir.Name) {
 	switch kind {
 	case embedString, embedBytes:
 		file := files[0]
-		fsym, size, err := fileStringSym(v.Pos(), base.Flag.Cfg.Embed.Files[file], kind == embedString, nil)
+		fsym, size, _, err := fileStringSym(v.Pos(), base.Flag.Cfg.Embed.Files[file], kind == embedString, nil)
 		if err != nil {
 			base.ErrorfAt(v.Pos(), "embed %s: %v", file, err)
 		}
@@ -146,6 +146,7 @@ func WriteEmbed(v *ir.Name) {
 		//	name string
 		//	data string
 		//	hash [16]byte
+		//	mode uint64
 		// Emit one of these per file in the set.
 		const hashSize = 16
 		hash := make([]byte, hashSize)
@@ -157,14 +158,16 @@ func WriteEmbed(v *ir.Name) {
 				off = objw.Uintptr(slicedata, off, 0)
 				off = objw.Uintptr(slicedata, off, 0)
 				off += hashSize
+				off = objw.Uintptr(slicedata, off, 0) //todo load dir perms
 			} else {
-				fsym, size, err := fileStringSym(v.Pos(), base.Flag.Cfg.Embed.Files[file], true, hash)
+				fsym, size, perm, err := fileStringSym(v.Pos(), base.Flag.Cfg.Embed.Files[file], true, hash)
 				if err != nil {
 					base.ErrorfAt(v.Pos(), "embed %s: %v", file, err)
 				}
 				off = objw.SymPtr(slicedata, off, fsym, 0) // data string
 				off = objw.Uintptr(slicedata, off, uint64(size))
 				off = int(slicedata.WriteBytes(base.Ctxt, int64(off), hash))
+				off = objw.Uintptr(slicedata, off, uint64(perm))
 			}
 		}
 		objw.Global(slicedata, int32(off), obj.RODATA|obj.LOCAL)
