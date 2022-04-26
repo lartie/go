@@ -244,6 +244,8 @@ func (b *Reader) Read(p []byte) (n int, err error) {
 	}
 
 	// copy as much as we can
+	// Note: if the slice panics here, it is probably because
+	// the underlying reader returned a bad count. See issue 49795.
 	n = copy(p, b.buf[b.r:b.w])
 	b.r += n
 	b.lastByte = int(b.buf[b.r-1])
@@ -593,6 +595,8 @@ func NewWriterSize(w io.Writer, size int) *Writer {
 }
 
 // NewWriter returns a new Writer whose buffer has the default size.
+// If the argument io.Writer is already a Writer with large enough buffer size,
+// it returns the underlying Writer.
 func NewWriter(w io.Writer) *Writer {
 	return NewWriterSize(w, defaultBufSize)
 }
@@ -727,13 +731,28 @@ func (b *Writer) WriteRune(r rune) (size int, err error) {
 // If the count is less than len(s), it also returns an error explaining
 // why the write is short.
 func (b *Writer) WriteString(s string) (int, error) {
+	var sw io.StringWriter
+	tryStringWriter := true
+
 	nn := 0
 	for len(s) > b.Available() && b.err == nil {
-		n := copy(b.buf[b.n:], s)
-		b.n += n
+		var n int
+		if b.Buffered() == 0 && sw == nil && tryStringWriter {
+			// Check at most once whether b.wr is a StringWriter.
+			sw, tryStringWriter = b.wr.(io.StringWriter)
+		}
+		if b.Buffered() == 0 && tryStringWriter {
+			// Large write, empty buffer, and the underlying writer supports
+			// WriteString: forward the write to the underlying StringWriter.
+			// This avoids an extra copy.
+			n, b.err = sw.WriteString(s)
+		} else {
+			n = copy(b.buf[b.n:], s)
+			b.n += n
+			b.Flush()
+		}
 		nn += n
 		s = s[n:]
-		b.Flush()
 	}
 	if b.err != nil {
 		return nn, b.err

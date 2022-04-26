@@ -50,7 +50,7 @@ func nilRegisterNumber(name string, n int16) (int16, bool) {
 
 // Set configures the architecture specified by GOARCH and returns its representation.
 // It returns nil if GOARCH is not recognized.
-func Set(GOARCH string) *Arch {
+func Set(GOARCH string, shared bool) *Arch {
 	switch GOARCH {
 	case "386":
 		return archX86(&x86.Link386)
@@ -73,7 +73,7 @@ func Set(GOARCH string) *Arch {
 	case "ppc64le":
 		return archPPC64(&ppc64.Linkppc64le)
 	case "riscv64":
-		return archRISCV64()
+		return archRISCV64(shared)
 	case "s390x":
 		return archS390x()
 	case "wasm":
@@ -278,46 +278,7 @@ func archArm64() *Arch {
 	}
 
 	register["LR"] = arm64.REGLINK
-	register["DAIFSet"] = arm64.REG_DAIFSet
-	register["DAIFClr"] = arm64.REG_DAIFClr
-	register["PLDL1KEEP"] = arm64.REG_PLDL1KEEP
-	register["PLDL1STRM"] = arm64.REG_PLDL1STRM
-	register["PLDL2KEEP"] = arm64.REG_PLDL2KEEP
-	register["PLDL2STRM"] = arm64.REG_PLDL2STRM
-	register["PLDL3KEEP"] = arm64.REG_PLDL3KEEP
-	register["PLDL3STRM"] = arm64.REG_PLDL3STRM
-	register["PLIL1KEEP"] = arm64.REG_PLIL1KEEP
-	register["PLIL1STRM"] = arm64.REG_PLIL1STRM
-	register["PLIL2KEEP"] = arm64.REG_PLIL2KEEP
-	register["PLIL2STRM"] = arm64.REG_PLIL2STRM
-	register["PLIL3KEEP"] = arm64.REG_PLIL3KEEP
-	register["PLIL3STRM"] = arm64.REG_PLIL3STRM
-	register["PSTL1KEEP"] = arm64.REG_PSTL1KEEP
-	register["PSTL1STRM"] = arm64.REG_PSTL1STRM
-	register["PSTL2KEEP"] = arm64.REG_PSTL2KEEP
-	register["PSTL2STRM"] = arm64.REG_PSTL2STRM
-	register["PSTL3KEEP"] = arm64.REG_PSTL3KEEP
-	register["PSTL3STRM"] = arm64.REG_PSTL3STRM
 
-	// Conditional operators, like EQ, NE, etc.
-	register["EQ"] = arm64.COND_EQ
-	register["NE"] = arm64.COND_NE
-	register["HS"] = arm64.COND_HS
-	register["CS"] = arm64.COND_HS
-	register["LO"] = arm64.COND_LO
-	register["CC"] = arm64.COND_LO
-	register["MI"] = arm64.COND_MI
-	register["PL"] = arm64.COND_PL
-	register["VS"] = arm64.COND_VS
-	register["VC"] = arm64.COND_VC
-	register["HI"] = arm64.COND_HI
-	register["LS"] = arm64.COND_LS
-	register["GE"] = arm64.COND_GE
-	register["LT"] = arm64.COND_LT
-	register["GT"] = arm64.COND_GT
-	register["LE"] = arm64.COND_LE
-	register["AL"] = arm64.COND_AL
-	register["NV"] = arm64.COND_NV
 	// Pseudo-registers.
 	register["SB"] = RSB
 	register["FP"] = RFP
@@ -541,12 +502,18 @@ func archMips64(linkArch *obj.LinkArch) *Arch {
 	}
 }
 
-func archRISCV64() *Arch {
+func archRISCV64(shared bool) *Arch {
 	register := make(map[string]int16)
 
 	// Standard register names.
 	for i := riscv.REG_X0; i <= riscv.REG_X31; i++ {
-		if i == riscv.REG_G {
+		// Disallow X3 in shared mode, as this will likely be used as the
+		// GP register, which could result in problems in non-Go code,
+		// including signal handlers.
+		if shared && i == riscv.REG_GP {
+			continue
+		}
+		if i == riscv.REG_TP || i == riscv.REG_G {
 			continue
 		}
 		name := fmt.Sprintf("X%d", i-riscv.REG_X0)

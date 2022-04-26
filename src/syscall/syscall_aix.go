@@ -15,6 +15,11 @@ import (
 	"unsafe"
 )
 
+func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno)
+func Syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno)
+func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno)
+func RawSyscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno)
+
 // Implemented in runtime/syscall_aix.go.
 func rawSyscall6(trap, nargs, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno)
 func syscall6(trap, nargs, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno)
@@ -66,8 +71,10 @@ func Pipe(p []int) (err error) {
 	}
 	var pp [2]_C_int
 	err = pipe(&pp)
-	p[0] = int(pp[0])
-	p[1] = int(pp[1])
+	if err == nil {
+		p[0] = int(pp[0])
+		p[1] = int(pp[1])
+	}
 	return
 }
 
@@ -321,10 +328,9 @@ func Accept(fd int) (nfd int, sa Sockaddr, err error) {
 	return
 }
 
-func Recvmsg(fd int, p, oob []byte, flags int) (n, oobn int, recvflags int, from Sockaddr, err error) {
+func recvmsgRaw(fd int, p, oob []byte, flags int, rsa *RawSockaddrAny) (n, oobn int, recvflags int, err error) {
 	var msg Msghdr
-	var rsa RawSockaddrAny
-	msg.Name = (*byte)(unsafe.Pointer(&rsa))
+	msg.Name = (*byte)(unsafe.Pointer(rsa))
 	msg.Namelen = uint32(SizeofSockaddrAny)
 	var iov Iovec
 	if len(p) > 0 {
@@ -353,27 +359,10 @@ func Recvmsg(fd int, p, oob []byte, flags int) (n, oobn int, recvflags int, from
 	}
 	oobn = int(msg.Controllen)
 	recvflags = int(msg.Flags)
-	// source address is only specified if the socket is unconnected
-	if rsa.Addr.Family != AF_UNSPEC {
-		from, err = anyToSockaddr(&rsa)
-	}
 	return
 }
 
-func Sendmsg(fd int, p, oob []byte, to Sockaddr, flags int) (err error) {
-	_, err = SendmsgN(fd, p, oob, to, flags)
-	return
-}
-
-func SendmsgN(fd int, p, oob []byte, to Sockaddr, flags int) (n int, err error) {
-	var ptr unsafe.Pointer
-	var salen _Socklen
-	if to != nil {
-		ptr, salen, err = to.sockaddr()
-		if err != nil {
-			return 0, err
-		}
-	}
+func sendmsgN(fd int, p, oob []byte, ptr unsafe.Pointer, salen _Socklen, flags int) (n int, err error) {
 	var msg Msghdr
 	msg.Name = (*byte)(unsafe.Pointer(ptr))
 	msg.Namelen = uint32(salen)
@@ -610,6 +599,7 @@ func PtraceDetach(pid int) (err error) { return ptrace64(PT_DETACH, int64(pid), 
 //sys	Getppid() (ppid int)
 //sys	Getpriority(which int, who int) (n int, err error)
 //sysnb	Getrlimit(which int, lim *Rlimit) (err error)
+//sysnb	Getrusage(who int, rusage *Rusage) (err error)
 //sysnb	Getuid() (uid int)
 //sys	Kill(pid int, signum Signal) (err error)
 //sys	Lchown(path string, uid int, gid int) (err error)
@@ -619,8 +609,8 @@ func PtraceDetach(pid int) (err error) { return ptrace64(PT_DETACH, int64(pid), 
 //sys	Mkdirat(dirfd int, path string, mode uint32) (err error)
 //sys	Mknodat(dirfd int, path string, mode uint32, dev int) (err error)
 //sys	Open(path string, mode int, perm uint32) (fd int, err error)
-//sys	Pread(fd int, p []byte, offset int64) (n int, err error)
-//sys	Pwrite(fd int, p []byte, offset int64) (n int, err error)
+//sys	pread(fd int, p []byte, offset int64) (n int, err error)
+//sys	pwrite(fd int, p []byte, offset int64) (n int, err error)
 //sys	read(fd int, p []byte) (n int, err error)
 //sys	Reboot(how int) (err error)
 //sys	Rename(from string, to string) (err error)

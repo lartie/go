@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package bug implements the ``go bug'' command.
+// Package bug implements the “go bug” command.
 package bug
 
 import (
@@ -106,8 +106,9 @@ func printGoEnv(w io.Writer) {
 }
 
 func printGoDetails(w io.Writer) {
-	printCmdOut(w, "GOROOT/bin/go version: ", filepath.Join(runtime.GOROOT(), "bin/go"), "version")
-	printCmdOut(w, "GOROOT/bin/go tool compile -V: ", filepath.Join(runtime.GOROOT(), "bin/go"), "tool", "compile", "-V")
+	gocmd := filepath.Join(runtime.GOROOT(), "bin/go")
+	printCmdOut(w, "GOROOT/bin/go version: ", gocmd, "version")
+	printCmdOut(w, "GOROOT/bin/go tool compile -V: ", gocmd, "tool", "compile", "-V")
 }
 
 func printOSDetails(w io.Writer) {

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build amd64
+//go:build amd64 || arm64
 
 package runtime
 
@@ -16,7 +16,7 @@ const (
 )
 
 func debugCallV2()
-func debugCallPanicked(val interface{})
+func debugCallPanicked(val any)
 
 // debugCallCheck checks whether it is safe to inject a debugger
 // function call with return PC pc. If not, it returns a string

@@ -755,8 +755,8 @@ func (f *xcoffFile) writeSymbolNewFile(ctxt *Link, name string, firstEntry uint6
 }
 
 // Update values for the previous package.
-//  - Svalue of the C_FILE symbol: if it is the last one, this Svalue must be -1
-//  - Xsclen of the csect symbol.
+//   - Svalue of the C_FILE symbol: if it is the last one, this Svalue must be -1
+//   - Xsclen of the csect symbol.
 func (f *xcoffFile) updatePreviousFile(ctxt *Link, last bool) {
 	// first file
 	if currSymSrcFile.file == nil {
@@ -1290,10 +1290,6 @@ func Xcoffadddynrel(target *Target, ldr *loader.Loader, syms *ArchSyms, s loader
 }
 
 func (ctxt *Link) doxcoff() {
-	if *FlagD {
-		// All XCOFF files have dynamic symbols because of the syscalls.
-		Exitf("-d is not available on AIX")
-	}
 	ldr := ctxt.loader
 
 	// TOC

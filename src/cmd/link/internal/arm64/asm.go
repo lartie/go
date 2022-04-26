@@ -602,7 +602,7 @@ func pereloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 	rs := r.Xsym
 	rt := r.Type
 
-	if r.Xadd != signext21(r.Xadd) {
+	if rt == objabi.R_ADDRARM64 && r.Xadd != signext21(r.Xadd) {
 		// If the relocation target would overflow the addend, then target
 		// a linker-manufactured label symbol with a smaller addend instead.
 		label := ldr.Lookup(offsetLabelName(ldr, rs, r.Xadd/peRelocLimit*peRelocLimit), ldr.SymVersion(rs))
@@ -1146,7 +1146,8 @@ func gensymlate(ctxt *ld.Link, ldr *loader.Loader) {
 		if !ldr.AttrReachable(s) {
 			continue
 		}
-		if ldr.SymType(s) == sym.STEXT {
+		t := ldr.SymType(s)
+		if t == sym.STEXT {
 			if ctxt.IsDarwin() || ctxt.IsWindows() {
 				// Cannot relocate into middle of function.
 				// Generate symbol names for every offset we need in duffcopy/duffzero (only 64 each).
@@ -1158,6 +1159,9 @@ func gensymlate(ctxt *ld.Link, ldr *loader.Loader) {
 				}
 			}
 			continue // we don't target the middle of other functions
+		}
+		if t >= sym.SDWARFSECT {
+			continue // no need to add label for DWARF symbols
 		}
 		sz := ldr.SymSize(s)
 		if sz <= limit {

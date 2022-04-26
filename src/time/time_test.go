@@ -281,6 +281,8 @@ func TestTruncateRound(t *testing.T) {
 	b1e9.SetInt64(1e9)
 
 	testOne := func(ti, tns, di int64) bool {
+		t.Helper()
+
 		t0 := Unix(ti, int64(tns)).UTC()
 		d := Duration(di)
 		if d < 0 {
@@ -367,6 +369,13 @@ func TestTruncateRound(t *testing.T) {
 		for i := 0; i < int(b); i++ {
 			d *= 5
 		}
+
+		// Make room for unix ↔ internal conversion.
+		// We don't care about behavior too close to ± 2^63 Unix seconds.
+		// It is full of wraparounds but will never happen in a reasonable program.
+		// (Or maybe not? See go.dev/issue/20678. In any event, they're not handled today.)
+		ti >>= 1
+
 		return testOne(ti, int64(tns), int64(d))
 	}
 	quick.Check(f1, cfg)
@@ -377,6 +386,7 @@ func TestTruncateRound(t *testing.T) {
 		if d < 0 {
 			d = -d
 		}
+		ti >>= 1 // see comment in f1
 		return testOne(ti, int64(tns), int64(d))
 	}
 	quick.Check(f2, cfg)
@@ -399,6 +409,7 @@ func TestTruncateRound(t *testing.T) {
 
 	// full generality
 	f4 := func(ti int64, tns int32, di int64) bool {
+		ti >>= 1 // see comment in f1
 		return testOne(ti, int64(tns), di)
 	}
 	quick.Check(f4, cfg)
@@ -1240,6 +1251,30 @@ func TestDurationRound(t *testing.T) {
 	}
 }
 
+var durationAbsTests = []struct {
+	d    Duration
+	want Duration
+}{
+	{0, 0},
+	{1, 1},
+	{-1, 1},
+	{1 * Minute, 1 * Minute},
+	{-1 * Minute, 1 * Minute},
+	{minDuration, maxDuration},
+	{minDuration + 1, maxDuration},
+	{minDuration + 2, maxDuration - 1},
+	{maxDuration, maxDuration},
+	{maxDuration - 1, maxDuration - 1},
+}
+
+func TestDurationAbs(t *testing.T) {
+	for _, tt := range durationAbsTests {
+		if got := tt.d.Abs(); got != tt.want {
+			t.Errorf("Duration(%s).Abs() = %s; want: %s", tt.d, got, tt.want)
+		}
+	}
+}
+
 var defaultLocTests = []struct {
 	name string
 	f    func(t1, t2 Time) bool
@@ -1557,8 +1592,8 @@ func TestConcurrentTimerResetStop(t *testing.T) {
 }
 
 func TestTimeIsDST(t *testing.T) {
-	ForceZipFileForTesting(true)
-	defer ForceZipFileForTesting(false)
+	undo := DisablePlatformSources()
+	defer undo()
 
 	tzWithDST, err := LoadLocation("Australia/Sydney")
 	if err != nil {
@@ -1613,6 +1648,48 @@ func TestTimeAddSecOverflow(t *testing.T) {
 		notMonoTime = notMonoTime.Add(Duration(i * 1e9))
 		if newSec := notMonoTime.Unix(); newSec != sec+i && newSec+UnixToInternal != maxInt64 {
 			t.Fatalf("time ext: %d overflows with positive delta, overflow threshold: %d", newSec, maxInt64)
+		}
+	}
+}
+
+// Issue 49284: time: ParseInLocation incorrectly because of Daylight Saving Time
+func TestTimeWithZoneTransition(t *testing.T) {
+	undo := DisablePlatformSources()
+	defer undo()
+
+	loc, err := LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := [...]struct {
+		give Time
+		want Time
+	}{
+		// 14 Apr 1991 - Daylight Saving Time Started
+		// When time of "Asia/Shanghai" was about to reach
+		// Sunday, 14 April 1991, 02:00:00 clocks were turned forward 1 hour to
+		// Sunday, 14 April 1991, 03:00:00 local daylight time instead.
+		// The UTC time was 13 April 1991, 18:00:00
+		0: {Date(1991, April, 13, 17, 50, 0, 0, loc), Date(1991, April, 13, 9, 50, 0, 0, UTC)},
+		1: {Date(1991, April, 13, 18, 0, 0, 0, loc), Date(1991, April, 13, 10, 0, 0, 0, UTC)},
+		2: {Date(1991, April, 14, 1, 50, 0, 0, loc), Date(1991, April, 13, 17, 50, 0, 0, UTC)},
+		3: {Date(1991, April, 14, 3, 0, 0, 0, loc), Date(1991, April, 13, 18, 0, 0, 0, UTC)},
+
+		// 15 Sep 1991 - Daylight Saving Time Ended
+		// When local daylight time of "Asia/Shanghai" was about to reach
+		// Sunday, 15 September 1991, 02:00:00 clocks were turned backward 1 hour to
+		// Sunday, 15 September 1991, 01:00:00 local standard time instead.
+		// The UTC time was 14 September 1991, 17:00:00
+		4: {Date(1991, September, 14, 16, 50, 0, 0, loc), Date(1991, September, 14, 7, 50, 0, 0, UTC)},
+		5: {Date(1991, September, 14, 17, 0, 0, 0, loc), Date(1991, September, 14, 8, 0, 0, 0, UTC)},
+		6: {Date(1991, September, 15, 0, 50, 0, 0, loc), Date(1991, September, 14, 15, 50, 0, 0, UTC)},
+		7: {Date(1991, September, 15, 2, 00, 0, 0, loc), Date(1991, September, 14, 18, 00, 0, 0, UTC)},
+	}
+
+	for i, tt := range tests {
+		if !tt.give.Equal(tt.want) {
+			t.Errorf("#%d:: %#v is not equal to %#v", i, tt.give.Format(RFC3339), tt.want.Format(RFC3339))
 		}
 	}
 }

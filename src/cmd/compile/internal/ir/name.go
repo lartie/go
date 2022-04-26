@@ -48,7 +48,6 @@ type Name struct {
 	Opt       interface{} // for use by escape analysis
 	Embed     *[]Embed    // list of embedded files, for ONAME var
 
-	PkgName *PkgName // real package for import . names
 	// For a local variable (not param) or extern, the initializing assignment (OAS or OAS2).
 	// For a closure var, the ONAME node of the outer captured variable.
 	// For the case-local variables of a type switch, the type switch guard (OTYPESW).
@@ -146,7 +145,10 @@ func (n *Name) editChildren(edit func(Node) Node)  {}
 // That is, given "type T Defn", it returns Defn.
 // It is used by package types.
 func (n *Name) TypeDefn() *types.Type {
-	return n.Ntype.Type()
+	if n.Ntype != nil {
+		return n.Ntype.Type()
+	}
+	return n.Type()
 }
 
 // RecordFrameOffset records the frame offset for the name.
@@ -162,14 +164,6 @@ func NewNameAt(pos src.XPos, sym *types.Sym) *Name {
 		base.Fatalf("NewNameAt nil")
 	}
 	return newNameAt(pos, ONAME, sym)
-}
-
-// NewIota returns a new OIOTA Node.
-func NewIota(pos src.XPos, sym *types.Sym) *Name {
-	if sym == nil {
-		base.Fatalf("NewIota nil")
-	}
-	return newNameAt(pos, OIOTA, sym)
 }
 
 // NewDeclNameAt returns a new Name associated with symbol s at position pos.
@@ -221,15 +215,6 @@ func (n *Name) SetOffset(x int64) {
 }
 func (n *Name) FrameOffset() int64     { return n.Offset_ }
 func (n *Name) SetFrameOffset(x int64) { n.Offset_ = x }
-func (n *Name) Iota() int64            { return n.Offset_ }
-func (n *Name) SetIota(x int64)        { n.Offset_ = x }
-func (n *Name) Walkdef() uint8         { return n.bits.get2(miniWalkdefShift) }
-func (n *Name) SetWalkdef(x uint8) {
-	if x > 3 {
-		panic(fmt.Sprintf("cannot SetWalkdef %d", x))
-	}
-	n.bits.set2(miniWalkdefShift, x)
-}
 
 func (n *Name) Linksym() *obj.LSym               { return n.sym.Linksym() }
 func (n *Name) LinksymABI(abi obj.ABI) *obj.LSym { return n.sym.LinksymABI(abi) }
@@ -532,23 +517,4 @@ const (
 type Embed struct {
 	Pos      src.XPos
 	Patterns []string
-}
-
-// A Pack is an identifier referring to an imported package.
-type PkgName struct {
-	miniNode
-	sym  *types.Sym
-	Pkg  *types.Pkg
-	Used bool
-}
-
-func (p *PkgName) Sym() *types.Sym { return p.sym }
-
-func (*PkgName) CanBeNtype() {}
-
-func NewPkgName(pos src.XPos, sym *types.Sym, pkg *types.Pkg) *PkgName {
-	p := &PkgName{sym: sym, Pkg: pkg}
-	p.op = OPACK
-	p.pos = pos
-	return p
 }

@@ -525,8 +525,14 @@ func Goexit() {
 // Used when crashing with panicking.
 func preprintpanics(p *_panic) {
 	defer func() {
-		if recover() != nil {
-			throw("panic while printing panic value")
+		text := "panic while printing panic value"
+		switch r := recover().(type) {
+		case nil:
+			// nothing to do
+		case string:
+			throw(text + ": " + r)
+		default:
+			throw(text + ": type " + efaceOf(&r)._type.string())
 		}
 	}()
 	for p != nil {
@@ -755,7 +761,7 @@ func deferCallSave(p *_panic, fn func()) {
 }
 
 // The implementation of the predeclared function panic.
-func gopanic(e interface{}) {
+func gopanic(e any) {
 	gp := getg()
 	if gp.m.curg != gp {
 		print("panic: ")
@@ -944,6 +950,7 @@ func gopanic(e interface{}) {
 
 // getargp returns the location where the caller
 // writes outgoing function call arguments.
+//
 //go:nosplit
 //go:noinline
 func getargp() uintptr {
@@ -956,8 +963,9 @@ func getargp() uintptr {
 //
 // TODO(rsc): Once we commit to CopyStackAlways,
 // this doesn't need to be nosplit.
+//
 //go:nosplit
-func gorecover(argp uintptr) interface{} {
+func gorecover(argp uintptr) any {
 	// Must be in a function running as part of a deferred call during the panic.
 	// Must be called from the topmost function of the call
 	// (the function used in the defer statement).
@@ -1002,11 +1010,6 @@ var runningPanicDefers uint32
 // panicking is incremented and decremented atomically.
 var panicking uint32
 
-// tracebackprinted is zero before gopanic() prints the traceback. After
-// traceback is printed, it sets to 1 so that the subsequent exception handler
-// won't print the traceback again.
-var tracebackprinted uint32
-
 // paniclk is held while printing the panic information and stack trace,
 // so that two concurrent panics don't overlap their output.
 var paniclk mutex
@@ -1050,9 +1053,6 @@ func fatalthrow() {
 		startpanic_m()
 
 		if dopanic_m(gp, pc, sp) {
-			// At this point, traceback has already been printed.
-			// Set tracebackprinted to 1 to avoid printing traceback again
-			tracebackprinted = 1
 			// crash uses a decent amount of nosplit stack and we're already
 			// low on stack in throw, so crash on the system stack (unlike
 			// fatalpanic).
@@ -1094,9 +1094,6 @@ func fatalpanic(msgs *_panic) {
 	})
 
 	if docrash {
-		// At this point, traceback has already been printed.
-		// Set tracebackprinted to 1 to avoid printing traceback again
-		tracebackprinted = 1
 		// By crashing outside the above systemstack call, debuggers
 		// will not be confused when generating a backtrace.
 		// Function crash is marked nosplit to avoid stack growth.

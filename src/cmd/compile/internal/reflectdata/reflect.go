@@ -14,6 +14,7 @@ import (
 
 	"cmd/compile/internal/base"
 	"cmd/compile/internal/bitvec"
+	"cmd/compile/internal/compare"
 	"cmd/compile/internal/escape"
 	"cmd/compile/internal/inline"
 	"cmd/compile/internal/ir"
@@ -667,10 +668,10 @@ var kinds = []int{
 // tflag is documented in reflect/type.go.
 //
 // tflag values must be kept in sync with copies in:
-//	cmd/compile/internal/reflectdata/reflect.go
-//	cmd/link/internal/ld/decodesym.go
-//	reflect/type.go
-//	runtime/type.go
+//   - cmd/compile/internal/reflectdata/reflect.go
+//   - cmd/link/internal/ld/decodesym.go
+//   - reflect/type.go
+//   - runtime/type.go
 const (
 	tflagUncommon      = 1 << 0
 	tflagExtraStar     = 1 << 1
@@ -728,7 +729,7 @@ func dcommontype(lsym *obj.LSym, t *types.Type) int {
 	if t.Sym() != nil && t.Sym().Name != "" {
 		tflag |= tflagNamed
 	}
-	if isRegularMemory(t) {
+	if compare.IsRegularMemory(t) {
 		tflag |= tflagRegularMemory
 	}
 
@@ -846,14 +847,19 @@ func TypePtr(t *types.Type) *ir.AddrExpr {
 	return typecheck.Expr(typecheck.NodAddr(n)).(*ir.AddrExpr)
 }
 
-// ITabLsym returns the LSym representing the itab for concreate type typ
-// implementing interface iface.
+// ITabLsym returns the LSym representing the itab for concrete type typ implementing
+// interface iface. A dummy tab will be created in the unusual case where typ doesn't
+// implement iface. Normally, this wouldn't happen, because the typechecker would
+// have reported a compile-time error. This situation can only happen when the
+// destination type of a type assert or a type in a type switch is parameterized, so
+// it may sometimes, but not always, be a type that can't implement the specified
+// interface.
 func ITabLsym(typ, iface *types.Type) *obj.LSym {
 	s, existed := ir.Pkgs.Itab.LookupOK(typ.LinkString() + "," + iface.LinkString())
 	lsym := s.Linksym()
 
 	if !existed {
-		writeITab(lsym, typ, iface)
+		writeITab(lsym, typ, iface, true)
 	}
 	return lsym
 }
@@ -865,7 +871,7 @@ func ITabAddr(typ, iface *types.Type) *ir.AddrExpr {
 	lsym := s.Linksym()
 
 	if !existed {
-		writeITab(lsym, typ, iface)
+		writeITab(lsym, typ, iface, false)
 	}
 
 	n := ir.NewLinksymExpr(base.Pos, lsym, types.Types[types.TUINT8])
@@ -924,11 +930,12 @@ func hashMightPanic(t *types.Type) bool {
 	}
 }
 
-// formalType replaces byte and rune aliases with real types.
+// formalType replaces predeclared aliases with real types.
 // They've been separate internally to make error messages
 // better, but we have to merge them in the reflect tables.
 func formalType(t *types.Type) *types.Type {
-	if t == types.ByteType || t == types.RuneType {
+	switch t {
+	case types.AnyType, types.ByteType, types.RuneType:
 		return types.Types[t.Kind()]
 	}
 	return t
@@ -957,11 +964,6 @@ func writeType(t *types.Type) *obj.LSym {
 	}
 	if tbase.Kind() == types.TFORW {
 		base.Fatalf("unresolved defined type: %v", tbase)
-	}
-
-	dupok := 0
-	if tbase.Sym() == nil || tbase.HasShape() { // TODO(mdempsky): Probably need DUPOK for instantiated types too.
-		dupok = obj.DUPOK
 	}
 
 	if !NeedEmit(tbase) {
@@ -1195,6 +1197,15 @@ func writeType(t *types.Type) *obj.LSym {
 		}
 	}
 
+	// Note: DUPOK is required to ensure that we don't end up with more
+	// than one type descriptor for a given type, if the type descriptor
+	// can be defined in multiple packages, that is, unnamed types and
+	// instantiated types.
+	dupok := 0
+	if tbase.Sym() == nil || tbase.IsFullyInstantiated() {
+		dupok = obj.DUPOK
+	}
+
 	ot = dextratypeData(lsym, ot, t)
 	objw.Global(lsym, int32(ot), int16(dupok|obj.RODATA))
 
@@ -1279,9 +1290,10 @@ func WriteRuntimeTypes() {
 	}
 }
 
-// writeITab writes the itab for concrete type typ implementing
-// interface iface.
-func writeITab(lsym *obj.LSym, typ, iface *types.Type) {
+// writeITab writes the itab for concrete type typ implementing interface iface. If
+// allowNonImplement is true, allow the case where typ does not implement iface, and just
+// create a dummy itab with zeroed-out method entries.
+func writeITab(lsym *obj.LSym, typ, iface *types.Type, allowNonImplement bool) {
 	// TODO(mdempsky): Fix methodWrapper, geneq, and genhash (and maybe
 	// others) to stop clobbering these.
 	oldpos, oldfn := base.Pos, ir.CurFunc
@@ -1307,14 +1319,9 @@ func writeITab(lsym *obj.LSym, typ, iface *types.Type) {
 				break
 			}
 		}
-		if sigs[0].Sym.Name == "==" {
-			sigs = sigs[1:]
-			if len(sigs) == 0 {
-				break
-			}
-		}
 	}
-	if len(sigs) != 0 {
+	completeItab := len(sigs) == 0
+	if !allowNonImplement && !completeItab {
 		base.Fatalf("incomplete itab")
 	}
 
@@ -1322,14 +1329,19 @@ func writeITab(lsym *obj.LSym, typ, iface *types.Type) {
 	// type itab struct {
 	//   inter  *interfacetype
 	//   _type  *_type
-	//   hash   uint32
+	//   hash   uint32 // copy of _type.hash. Used for type switches.
 	//   _      [4]byte
-	//   fun    [1]uintptr // variable sized
+	//   fun    [1]uintptr // variable sized. fun[0]==0 means _type does not implement inter.
 	// }
 	o := objw.SymPtr(lsym, 0, writeType(iface), 0)
 	o = objw.SymPtr(lsym, o, writeType(typ), 0)
 	o = objw.Uint32(lsym, o, types.TypeHash(typ)) // copy of type hash
 	o += 4                                        // skip unused field
+	if !completeItab {
+		// If typ doesn't implement iface, make method entries be zero.
+		o = objw.Uintptr(lsym, o, 0)
+		entries = entries[:0]
+	}
 	for _, fn := range entries {
 		o = objw.SymPtrWeak(lsym, o, fn, 0) // method pointer for each method
 	}
@@ -1393,6 +1405,7 @@ func WriteBasicTypes() {
 		}
 		writeType(types.NewPtr(types.Types[types.TSTRING]))
 		writeType(types.NewPtr(types.Types[types.TUNSAFEPTR]))
+		writeType(types.AnyType)
 
 		// emit type structs for error and func(error) string.
 		// The latter is the type of an auto-generated wrapper.
@@ -1423,7 +1436,7 @@ func WriteBasicTypes() {
 
 type typeAndStr struct {
 	t       *types.Type
-	short   string // "short" here means NameString
+	short   string // "short" here means TypeSymName
 	regular string
 }
 
@@ -1488,7 +1501,6 @@ func (a typesByString) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 // use bitmaps for objects up to 64 kB in size.
 //
 // Also known to reflect/type.go.
-//
 const maxPtrmaskBytes = 2048
 
 // GCSym returns a data symbol containing GC information for type t, along
@@ -1783,13 +1795,17 @@ func NeedEmit(typ *types.Type) bool {
 // Also wraps methods on instantiated generic types for use in itab entries.
 // For an instantiated generic type G[int], we generate wrappers like:
 // G[int] pointer shaped:
+//
 //	func (x G[int]) f(arg) {
 //		.inst.G[int].f(dictionary, x, arg)
-// 	}
+//	}
+//
 // G[int] not pointer shaped:
+//
 //	func (x *G[int]) f(arg) {
 //		.inst.G[int].f(dictionary, *x, arg)
-// 	}
+//	}
+//
 // These wrappers are always fully stenciled.
 func methodWrapper(rcvr *types.Type, method *types.Field, forItab bool) *obj.LSym {
 	orig := rcvr
@@ -1814,15 +1830,16 @@ func methodWrapper(rcvr *types.Type, method *types.Field, forItab bool) *obj.LSy
 
 	newnam := ir.MethodSym(rcvr, method.Sym)
 	lsym := newnam.Linksym()
+
+	// Unified IR creates its own wrappers.
+	if base.Debug.Unified != 0 {
+		return lsym
+	}
+
 	if newnam.Siggen() {
 		return lsym
 	}
 	newnam.SetSiggen(true)
-
-	// Except in quirks mode, unified IR creates its own wrappers.
-	if base.Debug.Unified != 0 && base.Debug.UnifiedQuirks == 0 {
-		return lsym
-	}
 
 	methodrcvr := method.Type.Recv().Type
 	// For generic methods, we need to generate the wrapper even if the receiver
@@ -1914,18 +1931,25 @@ func methodWrapper(rcvr *types.Type, method *types.Field, forItab bool) *obj.LSy
 
 			// Target method uses shaped names.
 			targs2 := make([]*types.Type, len(targs))
+			origRParams := deref(orig).OrigType().RParams()
 			for i, t := range targs {
-				targs2[i] = typecheck.Shapify(t, i)
+				targs2[i] = typecheck.Shapify(t, i, origRParams[i])
 			}
 			targs = targs2
 
 			sym := typecheck.MakeFuncInstSym(ir.MethodSym(methodrcvr, method.Sym), targs, false, true)
 			if sym.Def == nil {
-				// Currently we make sure that we have all the instantiations
-				// we need by generating them all in ../noder/stencil.go:instantiateMethods
-				// TODO: maybe there's a better, more incremental way to generate
-				// only the instantiations we need?
-				base.Fatalf("instantiation %s not found", sym.Name)
+				// Currently we make sure that we have all the
+				// instantiations we need by generating them all in
+				// ../noder/stencil.go:instantiateMethods
+				// Extra instantiations because of an inlined function
+				// should have been exported, and so available via
+				// Resolve.
+				in := typecheck.Resolve(ir.NewIdent(src.NoXPos, sym))
+				if in.Op() == ir.ONONAME {
+					base.Fatalf("instantiation %s not found", sym.Name)
+				}
+				sym = in.Sym()
 			}
 			target := ir.AsNode(sym.Def)
 			call = ir.NewCallExpr(base.Pos, ir.OCALL, target, args)
@@ -2051,8 +2075,14 @@ func getDictionary(gf *types.Sym, targs []*types.Type) ir.Node {
 	sym := typecheck.MakeDictSym(gf, targs, true)
 
 	// Dictionary should already have been generated by instantiateMethods().
+	// Extra dictionaries needed because of an inlined function should have been
+	// exported, and so available via Resolve.
 	if lsym := sym.Linksym(); len(lsym.P) == 0 {
-		base.Fatalf("Dictionary should have already been generated: %s.%s", sym.Pkg.Path, sym.Name)
+		in := typecheck.Resolve(ir.NewIdent(src.NoXPos, sym))
+		if in.Op() == ir.ONONAME {
+			base.Fatalf("Dictionary should have already been generated: %s.%s", sym.Pkg.Path, sym.Name)
+		}
+		sym = in.Sym()
 	}
 
 	// Make (or reuse) a node referencing the dictionary symbol.

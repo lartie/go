@@ -8,7 +8,7 @@ such as functions to control goroutines. It also includes the low-level type inf
 used by the reflect package; see reflect's documentation for the programmable
 interface to the run-time type system.
 
-Environment Variables
+# Environment Variables
 
 The following environment variables ($name or %name%, depending on the host
 operating system) control the run-time behavior of Go programs. The meanings
@@ -64,19 +64,26 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	Currently, it is:
 		gc # @#s #%: #+#+# ms clock, #+#/#/#+# ms cpu, #->#-># MB, # MB goal, # P
 	where the fields are as follows:
-		gc #        the GC number, incremented at each GC
-		@#s         time in seconds since program start
-		#%          percentage of time spent in GC since program start
-		#+...+#     wall-clock/CPU times for the phases of the GC
-		#->#-># MB  heap size at GC start, at GC end, and live heap
-		# MB goal   goal heap size
-		# P         number of processors used
+		gc #         the GC number, incremented at each GC
+		@#s          time in seconds since program start
+		#%           percentage of time spent in GC since program start
+		#+...+#      wall-clock/CPU times for the phases of the GC
+		#->#-># MB   heap size at GC start, at GC end, and live heap
+		# MB goal    goal heap size
+		# MB stacks  estimated scannable stack size
+		# MB globals scannable global size
+		# P          number of processors used
 	The phases are stop-the-world (STW) sweep termination, concurrent
 	mark and scan, and STW mark termination. The CPU times
 	for mark/scan are broken down in to assist time (GC performed in
 	line with allocation), background GC time, and idle GC time.
 	If the line ends with "(forced)", this GC was forced by a
 	runtime.GC() call.
+
+	harddecommit: setting harddecommit=1 causes memory that is returned to the OS to
+	also have protections removed on it. This is the only mode of operation on Windows,
+	but is helpful in debugging scavenger-related issues on other platforms. Currently,
+	only supported on Linux.
 
 	inittrace: setting inittrace=1 causes the runtime to emit a single line to standard
 	error for each package with init work, summarizing the execution time and memory
@@ -165,9 +172,9 @@ or the failure is internal to the run-time.
 GOTRACEBACK=none omits the goroutine stack traces entirely.
 GOTRACEBACK=single (the default) behaves as described above.
 GOTRACEBACK=all adds stack traces for all user-created goroutines.
-GOTRACEBACK=system is like ``all'' but adds stack frames for run-time functions
+GOTRACEBACK=system is like “all” but adds stack frames for run-time functions
 and shows goroutines created internally by the run-time.
-GOTRACEBACK=crash is like ``system'' but crashes in an operating system-specific
+GOTRACEBACK=crash is like “system” but crashes in an operating system-specific
 manner instead of exiting. For example, on Unix systems, the crash raises
 SIGABRT to trigger a core dump.
 For historical reasons, the GOTRACEBACK settings 0, 1, and 2 are synonyms for

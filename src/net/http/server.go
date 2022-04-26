@@ -494,8 +494,9 @@ type response struct {
 // prior to the headers being written. If the set of trailers is fixed
 // or known before the header is written, the normal Go trailers mechanism
 // is preferred:
-//    https://golang.org/pkg/net/http/#ResponseWriter
-//    https://golang.org/pkg/net/http/#example_ResponseWriter_trailers
+//
+//	https://pkg.go.dev/net/http#ResponseWriter
+//	https://pkg.go.dev/net/http#example-ResponseWriter-Trailers
 const TrailerPrefix = "Trailer:"
 
 // finalTrailers is called after the Handler exits and returns a non-nil
@@ -798,7 +799,7 @@ var (
 )
 
 var copyBufPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		b := make([]byte, 32*1024)
 		return &b
 	},
@@ -1426,11 +1427,11 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		hasCL = false
 	}
 
-	if w.req.Method == "HEAD" || !bodyAllowedForStatus(code) {
-		// do nothing
-	} else if code == StatusNoContent {
+	if w.req.Method == "HEAD" || !bodyAllowedForStatus(code) || code == StatusNoContent {
+		// Response has no body.
 		delHeader("Transfer-Encoding")
 	} else if hasCL {
+		// Content-Length has been provided, so no chunking is to be done.
 		delHeader("Transfer-Encoding")
 	} else if w.req.ProtoAtLeast(1, 1) {
 		// HTTP/1.1 or greater: Transfer-Encoding has been set to identity, and no
@@ -1441,6 +1442,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		if hasTE && te == "identity" {
 			cw.chunking = false
 			w.closeAfterReply = true
+			delHeader("Transfer-Encoding")
 		} else {
 			// HTTP/1.1 or greater: use chunked transfer encoding
 			// to avoid closing the connection at EOF.
@@ -1514,7 +1516,7 @@ func writeStatusLine(bw *bufio.Writer, is11 bool, code int, scratch []byte) {
 	} else {
 		bw.WriteString("HTTP/1.0 ")
 	}
-	if text, ok := statusText[code]; ok {
+	if text := StatusText(code); text != "" {
 		bw.Write(strconv.AppendInt(scratch[:0], int64(code), 10))
 		bw.WriteByte(' ')
 		bw.WriteString(text)
@@ -1550,14 +1552,14 @@ func (w *response) bodyAllowed() bool {
 //
 // The Writers are wired together like:
 //
-// 1. *response (the ResponseWriter) ->
-// 2. (*response).w, a *bufio.Writer of bufferBeforeChunkingSize bytes ->
-// 3. chunkWriter.Writer (whose writeHeader finalizes Content-Length/Type)
-//    and which writes the chunk headers, if needed ->
-// 4. conn.bufw, a *bufio.Writer of default (4kB) bytes, writing to ->
-// 5. checkConnErrorWriter{c}, which notes any non-nil error on Write
-//    and populates c.werr with it if so, but otherwise writes to ->
-// 6. the rwc, the net.Conn.
+//  1. *response (the ResponseWriter) ->
+//  2. (*response).w, a *bufio.Writer of bufferBeforeChunkingSize bytes ->
+//  3. chunkWriter.Writer (whose writeHeader finalizes Content-Length/Type)
+//     and which writes the chunk headers, if needed ->
+//  4. conn.bufw, a *bufio.Writer of default (4kB) bytes, writing to ->
+//  5. checkConnErrorWriter{c}, which notes any non-nil error on Write
+//     and populates c.werr with it if so, but otherwise writes to ->
+//  6. the rwc, the net.Conn.
 //
 // TODO(bradfitz): short-circuit some of the buffering when the
 // initial header contains both a Content-Type and Content-Length.
@@ -1720,7 +1722,7 @@ type closeWriter interface {
 var _ closeWriter = (*net.TCPConn)(nil)
 
 // closeWrite flushes any outstanding data and sends a FIN packet (if
-// client is connected via TCP), signalling that we're done. We then
+// client is connected via TCP), signaling that we're done. We then
 // pause for a bit, hoping the client processes it before any
 // subsequent RST.
 //
@@ -2100,7 +2102,7 @@ func Error(w ResponseWriter, error string, code int) {
 func NotFound(w ResponseWriter, r *Request) { Error(w, "404 page not found", StatusNotFound) }
 
 // NotFoundHandler returns a simple request handler
-// that replies to each request with a ``404 page not found'' reply.
+// that replies to each request with a “404 page not found” reply.
 func NotFoundHandler() Handler { return HandlerFunc(NotFound) }
 
 // StripPrefix returns a handler that serves HTTP requests by removing the
@@ -2190,7 +2192,7 @@ func Redirect(w ResponseWriter, r *Request, url string, code int) {
 
 	// Shouldn't send the body for POST or HEAD; that leaves GET.
 	if !hadCT && r.Method == "GET" {
-		body := "<a href=\"" + htmlEscape(url) + "\">" + statusText[code] + "</a>.\n"
+		body := "<a href=\"" + htmlEscape(url) + "\">" + StatusText(code) + "</a>.\n"
 		fmt.Fprintln(w, body)
 	}
 }
@@ -2393,7 +2395,7 @@ func (mux *ServeMux) shouldRedirectRLocked(host, path string) bool {
 // the pattern that will match after following the redirect.
 //
 // If there is no registered handler that applies to the request,
-// Handler returns a ``page not found'' handler and an empty pattern.
+// Handler returns a “page not found” handler and an empty pattern.
 func (mux *ServeMux) Handler(r *Request) (h Handler, pattern string) {
 
 	// CONNECT requests are not canonicalized.
@@ -3189,7 +3191,7 @@ func (srv *Server) SetKeepAlivesEnabled(v bool) {
 	// TODO: Issue 26303: close HTTP/2 conns as soon as they become idle.
 }
 
-func (s *Server) logf(format string, args ...interface{}) {
+func (s *Server) logf(format string, args ...any) {
 	if s.ErrorLog != nil {
 		s.ErrorLog.Printf(format, args...)
 	} else {
@@ -3200,7 +3202,7 @@ func (s *Server) logf(format string, args ...interface{}) {
 // logf prints to the ErrorLog of the *Server associated with request r
 // via ServerContextKey. If there's no associated server, or if ErrorLog
 // is nil, logging is done via the log package's standard logger.
-func logf(r *Request, format string, args ...interface{}) {
+func logf(r *Request, format string, args ...any) {
 	s, _ := r.Context().Value(ServerContextKey).(*Server)
 	if s != nil && s.ErrorLog != nil {
 		s.ErrorLog.Printf(format, args...)
@@ -3363,7 +3365,7 @@ func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
 		h:   make(Header),
 		req: r,
 	}
-	panicChan := make(chan interface{}, 1)
+	panicChan := make(chan any, 1)
 	go func() {
 		defer func() {
 			if p := recover(); p != nil {
@@ -3391,9 +3393,15 @@ func (h *timeoutHandler) ServeHTTP(w ResponseWriter, r *Request) {
 	case <-ctx.Done():
 		tw.mu.Lock()
 		defer tw.mu.Unlock()
-		w.WriteHeader(StatusServiceUnavailable)
-		io.WriteString(w, h.errorBody())
-		tw.timedOut = true
+		switch err := ctx.Err(); err {
+		case context.DeadlineExceeded:
+			w.WriteHeader(StatusServiceUnavailable)
+			io.WriteString(w, h.errorBody())
+			tw.err = ErrHandlerTimeout
+		default:
+			w.WriteHeader(StatusServiceUnavailable)
+			tw.err = err
+		}
 	}
 }
 
@@ -3404,7 +3412,7 @@ type timeoutWriter struct {
 	req  *Request
 
 	mu          sync.Mutex
-	timedOut    bool
+	err         error
 	wroteHeader bool
 	code        int
 }
@@ -3424,8 +3432,8 @@ func (tw *timeoutWriter) Header() Header { return tw.h }
 func (tw *timeoutWriter) Write(p []byte) (int, error) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
-	if tw.timedOut {
-		return 0, ErrHandlerTimeout
+	if tw.err != nil {
+		return 0, tw.err
 	}
 	if !tw.wroteHeader {
 		tw.writeHeaderLocked(StatusOK)
@@ -3437,7 +3445,7 @@ func (tw *timeoutWriter) writeHeaderLocked(code int) {
 	checkWriteHeaderCode(code)
 
 	switch {
-	case tw.timedOut:
+	case tw.err != nil:
 		return
 	case tw.wroteHeader:
 		if tw.req != nil {
@@ -3603,4 +3611,13 @@ func tlsRecordHeaderLooksLikeHTTP(hdr [5]byte) bool {
 		return true
 	}
 	return false
+}
+
+// MaxBytesHandler returns a Handler that runs h with its ResponseWriter and Request.Body wrapped by a MaxBytesReader.
+func MaxBytesHandler(h Handler, n int64) Handler {
+	return HandlerFunc(func(w ResponseWriter, r *Request) {
+		r2 := *r
+		r2.Body = MaxBytesReader(w, r.Body, n)
+		h.ServeHTTP(w, &r2)
+	})
 }

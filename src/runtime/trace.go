@@ -229,7 +229,7 @@ func StartTrace() error {
 			gp.traceseq = 0
 			gp.tracelastp = getg().m.p
 			// +PCQuantum because traceFrameForPC expects return PCs and subtracts PCQuantum.
-			id := trace.stackTab.put([]uintptr{gp.startpc + sys.PCQuantum})
+			id := trace.stackTab.put([]uintptr{startPCforTrace(gp.startpc) + sys.PCQuantum})
 			traceEvent(traceEvGoCreate, -1, uint64(gp.goid), uint64(id), stackID)
 		}
 		if status == _Gwaiting {
@@ -426,6 +426,9 @@ func ReadTrace() []byte {
 		trace.footerWritten = true
 		// Use float64 because (trace.ticksEnd - trace.ticksStart) * 1e9 can overflow int64.
 		freq := float64(trace.ticksEnd-trace.ticksStart) * 1e9 / float64(trace.timeEnd-trace.timeStart) / traceTickDiv
+		if freq <= 0 {
+			throw("trace: ReadTrace got invalid frequency")
+		}
 		trace.lockOwner = nil
 		unlock(&trace.lock)
 		var data []byte
@@ -458,12 +461,13 @@ func ReadTrace() []byte {
 }
 
 // traceReader returns the trace reader that should be woken up, if any.
+// Callers should first check that trace.enabled or trace.shutdown is set.
 func traceReader() *g {
-	if trace.reader == 0 || (trace.fullHead == 0 && !trace.shutdown) {
+	if !traceReaderAvailable() {
 		return nil
 	}
 	lock(&trace.lock)
-	if trace.reader == 0 || (trace.fullHead == 0 && !trace.shutdown) {
+	if !traceReaderAvailable() {
 		unlock(&trace.lock)
 		return nil
 	}
@@ -471,6 +475,13 @@ func traceReader() *g {
 	trace.reader.set(nil)
 	unlock(&trace.lock)
 	return gp
+}
+
+// traceReaderAvailable returns true if the trace reader is not currently
+// scheduled and should be. Callers should first check that trace.enabled
+// or trace.shutdown is set.
+func traceReaderAvailable() bool {
+	return trace.reader != 0 && (trace.fullHead != 0 || trace.shutdown)
 }
 
 // traceProcFree frees trace buffer associated with pp.
@@ -1068,7 +1079,7 @@ func traceGoCreate(newg *g, pc uintptr) {
 	newg.traceseq = 0
 	newg.tracelastp = getg().m.p
 	// +PCQuantum because traceFrameForPC expects return PCs and subtracts PCQuantum.
-	id := trace.stackTab.put([]uintptr{pc + sys.PCQuantum})
+	id := trace.stackTab.put([]uintptr{startPCforTrace(pc) + sys.PCQuantum})
 	traceEvent(traceEvGoCreate, 2, uint64(newg.goid), uint64(id))
 }
 
@@ -1240,4 +1251,18 @@ func trace_userLog(id uint64, category, message string) {
 	buf.pos += copy(buf.arr[buf.pos:], message[:slen])
 
 	traceReleaseBuffer(pid)
+}
+
+// the start PC of a goroutine for tracing purposes. If pc is a wrapper,
+// it returns the PC of the wrapped function. Otherwise it returns pc.
+func startPCforTrace(pc uintptr) uintptr {
+	f := findfunc(pc)
+	if !f.valid() {
+		return pc // should not happen, but don't care
+	}
+	w := funcdata(f, _FUNCDATA_WrapInfo)
+	if w == nil {
+		return pc // not a wrapper
+	}
+	return f.datap.textAddr(*(*uint32)(w))
 }

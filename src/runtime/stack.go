@@ -144,11 +144,16 @@ const (
 	// Force a stack movement. Used for debugging.
 	// 0xfffffeed in hex.
 	stackForceMove = uintptrMask & -275
+
+	// stackPoisonMin is the lowest allowed stack poison value.
+	stackPoisonMin = uintptrMask & -4096
 )
 
 // Global pool of spans that have free stacks.
 // Stacks are assigned an order according to size.
-//     order = log_2(size/FixedStack)
+//
+//	order = log_2(size/FixedStack)
+//
 // There is a free list for each order.
 var stackpool [_NumStackOrders]struct {
 	item stackpoolItem
@@ -999,7 +1004,7 @@ func newstack() {
 	// NOTE: stackguard0 may change underfoot, if another thread
 	// is about to try to preempt gp. Read it just once and use that same
 	// value now and below.
-	preempt := atomic.Loaduintptr(&gp.stackguard0) == stackPreempt
+	stackguard0 := atomic.Loaduintptr(&gp.stackguard0)
 
 	// Be conservative about where we preempt.
 	// We are interested in preempting user Go code, not runtime code.
@@ -1013,6 +1018,7 @@ func newstack() {
 	// If the GC is in some way dependent on this goroutine (for example,
 	// it needs a lock held by the goroutine), that small preemption turns
 	// into a real deadlock.
+	preempt := stackguard0 == stackPreempt
 	if preempt {
 		if !canPreemptM(thisg.m) {
 			// Let the goroutine keep running for now.
@@ -1080,7 +1086,7 @@ func newstack() {
 		}
 	}
 
-	if gp.stackguard0 == stackForceMove {
+	if stackguard0 == stackForceMove {
 		// Forced stack movement used for debugging.
 		// Don't double the stack (or we may quickly run out
 		// if this is done repeatedly).
@@ -1328,7 +1334,8 @@ func getStackMap(frame *stkframe, cache *pcvalueCache, debug bool) (locals, args
 	}
 
 	// stack objects.
-	if (GOARCH == "amd64" || GOARCH == "arm64" || GOARCH == "ppc64" || GOARCH == "ppc64le") && unsafe.Sizeof(abi.RegArgs{}) > 0 && frame.argmap != nil {
+	if (GOARCH == "amd64" || GOARCH == "arm64" || GOARCH == "ppc64" || GOARCH == "ppc64le" || GOARCH == "riscv64") &&
+		unsafe.Sizeof(abi.RegArgs{}) > 0 && frame.argmap != nil {
 		// argmap is set when the function is reflect.makeFuncStub or reflect.methodValueCall.
 		// We don't actually use argmap in this case, but we need to fake the stack object
 		// record for these frames which contain an internal/abi.RegArgs at a hard-coded offset.
@@ -1354,7 +1361,7 @@ func getStackMap(frame *stkframe, cache *pcvalueCache, debug bool) (locals, args
 var methodValueCallFrameObjs [1]stackObjectRecord // initialized in stackobjectinit
 
 func stkobjinit() {
-	var abiRegArgsEface interface{} = abi.RegArgs{}
+	var abiRegArgsEface any = abi.RegArgs{}
 	abiRegArgsType := efaceOf(&abiRegArgsEface)._type
 	if abiRegArgsType.kind&kindGCProg != 0 {
 		throw("abiRegArgsType needs GC Prog, update methodValueCallFrameObjs")

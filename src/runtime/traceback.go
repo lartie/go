@@ -96,10 +96,24 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		}
 	}
 
+	// runtime/internal/atomic functions call into kernel helpers on
+	// arm < 7. See runtime/internal/atomic/sys_linux_arm.s.
+	//
+	// Start in the caller's frame.
+	if GOARCH == "arm" && goarm < 7 && GOOS == "linux" && frame.pc&0xffff0000 == 0xffff0000 {
+		// Note that the calls are simple BL without pushing the return
+		// address, so we use LR directly.
+		//
+		// The kernel helpers are frameless leaf functions, so SP and
+		// LR are not touched.
+		frame.pc = frame.lr
+		frame.lr = 0
+	}
+
 	f := findfunc(frame.pc)
 	if !f.valid() {
 		if callback != nil || printing {
-			print("runtime: unknown pc ", hex(frame.pc), "\n")
+			print("runtime: g ", gp.goid, ": unknown pc ", hex(frame.pc), "\n")
 			tracebackHexdump(gp.stack, &frame, 0)
 		}
 		if callback != nil {
@@ -233,7 +247,7 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 					doPrint = false
 				}
 				if callback != nil || doPrint {
-					print("runtime: unexpected return pc for ", funcname(f), " called from ", hex(frame.lr), "\n")
+					print("runtime: g ", gp.goid, ": unexpected return pc for ", funcname(f), " called from ", hex(frame.lr), "\n")
 					tracebackHexdump(gp.stack, &frame, lrPtr)
 				}
 				if callback != nil {
@@ -456,7 +470,7 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		}
 
 		waspanic = f.funcID == funcID_sigpanic
-		injectedCall := waspanic || f.funcID == funcID_asyncPreempt
+		injectedCall := waspanic || f.funcID == funcID_asyncPreempt || f.funcID == funcID_debugCallV2
 
 		// Do not unwind past the bottom of the stack.
 		if !flr.valid() {
@@ -1215,9 +1229,9 @@ func isSystemGoroutine(gp *g, fixed bool) bool {
 //
 // On all platforms, the traceback function is invoked when a call from
 // Go to C to Go requests a stack trace. On linux/amd64, linux/ppc64le,
-// and freebsd/amd64, the traceback function is also invoked when a
-// signal is received by a thread that is executing a cgo call. The
-// traceback function should not make assumptions about when it is
+// linux/arm64, and freebsd/amd64, the traceback function is also invoked
+// when a signal is received by a thread that is executing a cgo call.
+// The traceback function should not make assumptions about when it is
 // called, as future versions of Go may make additional calls.
 //
 // The symbolizer function will be called with a single argument, a

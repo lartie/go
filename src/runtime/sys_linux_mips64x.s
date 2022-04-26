@@ -3,8 +3,6 @@
 // license that can be found in the LICENSE file.
 
 //go:build linux && (mips64 || mips64le)
-// +build linux
-// +build mips64 mips64le
 
 //
 // System calls and other sys.stuff for mips64, Linux
@@ -113,17 +111,6 @@ TEXT runtime·read(SB),NOSPLIT|NOFRAME,$0-28
 	BEQ	R7, 2(PC)
 	SUBVU	R2, R0, R2	// caller expects negative errno
 	MOVW	R2, ret+24(FP)
-	RET
-
-// func pipe() (r, w int32, errno int32)
-TEXT runtime·pipe(SB),NOSPLIT|NOFRAME,$0-12
-	MOVV	$r+0(FP), R4
-	MOVV	R0, R5
-	MOVV	$SYS_pipe2, R2
-	SYSCALL
-	BEQ	R7, 2(PC)
-	SUBVU	R2, R0, R2	// caller expects negative errno
-	MOVW	R2, errno+8(FP)
 	RET
 
 // func pipe2(flags int32) (r, w int32, errno int32)
@@ -633,21 +620,6 @@ TEXT runtime·closeonexec(SB),NOSPLIT|NOFRAME,$0
 	MOVW    fd+0(FP), R4  // fd
 	MOVV    $2, R5  // F_SETFD
 	MOVV    $1, R6  // FD_CLOEXEC
-	MOVV	$SYS_fcntl, R2
-	SYSCALL
-	RET
-
-// func runtime·setNonblock(int32 fd)
-TEXT runtime·setNonblock(SB),NOSPLIT|NOFRAME,$0-4
-	MOVW	fd+0(FP), R4 // fd
-	MOVV	$3, R5	// F_GETFL
-	MOVV	$0, R6
-	MOVV	$SYS_fcntl, R2
-	SYSCALL
-	MOVW	$0x80, R6 // O_NONBLOCK
-	OR	R2, R6
-	MOVW	fd+0(FP), R4 // fd
-	MOVV	$4, R5	// F_SETFL
 	MOVV	$SYS_fcntl, R2
 	SYSCALL
 	RET

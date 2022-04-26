@@ -7,6 +7,7 @@ package atomic_test
 import (
 	"fmt"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	. "sync/atomic"
 	"testing"
@@ -31,7 +32,7 @@ const (
 )
 
 // Do the 64-bit functions panic? If so, don't bother testing.
-var test64err = func() (err interface{}) {
+var test64err = func() (err any) {
 	defer func() {
 		err = recover()
 	}()
@@ -1154,9 +1155,10 @@ func hammerStoreLoadUintptr(t *testing.T, paddr unsafe.Pointer) {
 	StoreUintptr(addr, new)
 }
 
-//go:nocheckptr
 // This code is just testing that LoadPointer/StorePointer operate
 // atomically; it's not actually calculating pointers.
+//
+//go:nocheckptr
 func hammerStoreLoadPointer(t *testing.T, paddr unsafe.Pointer) {
 	addr := (*unsafe.Pointer)(paddr)
 	v := uintptr(LoadPointer(addr))
@@ -1196,6 +1198,11 @@ func TestHammerStoreLoad(t *testing.T) {
 	}
 	const procs = 8
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(procs))
+	// Disable the GC because hammerStoreLoadPointer invokes
+	// write barriers on values that aren't real pointers.
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	// Ensure any in-progress GC is finished.
+	runtime.GC()
 	for _, tt := range tests {
 		c := make(chan int)
 		var val uint64

@@ -657,7 +657,7 @@ func TestWriterAppend(t *testing.T) {
 		}
 
 		// While not recommended, it is valid to append to a shifted buffer.
-		// This forces Write to copy the the input.
+		// This forces Write to copy the input.
 		if rn.Intn(8) == 0 && cap(b) > 0 {
 			b = b[1:1:cap(b)]
 		}
@@ -759,6 +759,67 @@ func TestWriteString(t *testing.T) {
 	s := "01234567890abcdefghijklmnopqrstuvwxyz"
 	if string(buf.Bytes()) != s {
 		t.Errorf("WriteString wants %q gets %q", s, string(buf.Bytes()))
+	}
+}
+
+func TestWriteStringStringWriter(t *testing.T) {
+	const BufSize = 8
+	{
+		tw := &teststringwriter{}
+		b := NewWriterSize(tw, BufSize)
+		b.WriteString("1234")
+		tw.check(t, "", "")
+		b.WriteString("56789012")   // longer than BufSize
+		tw.check(t, "12345678", "") // but not enough (after filling the partially-filled buffer)
+		b.Flush()
+		tw.check(t, "123456789012", "")
+	}
+	{
+		tw := &teststringwriter{}
+		b := NewWriterSize(tw, BufSize)
+		b.WriteString("123456789")   // long string, empty buffer:
+		tw.check(t, "", "123456789") // use WriteString
+	}
+	{
+		tw := &teststringwriter{}
+		b := NewWriterSize(tw, BufSize)
+		b.WriteString("abc")
+		tw.check(t, "", "")
+		b.WriteString("123456789012345")      // long string, non-empty buffer
+		tw.check(t, "abc12345", "6789012345") // use Write and then WriteString since the remaining part is still longer than BufSize
+	}
+	{
+		tw := &teststringwriter{}
+		b := NewWriterSize(tw, BufSize)
+		b.Write([]byte("abc")) // same as above, but use Write instead of WriteString
+		tw.check(t, "", "")
+		b.WriteString("123456789012345")
+		tw.check(t, "abc12345", "6789012345") // same as above
+	}
+}
+
+type teststringwriter struct {
+	write       string
+	writeString string
+}
+
+func (w *teststringwriter) Write(b []byte) (int, error) {
+	w.write += string(b)
+	return len(b), nil
+}
+
+func (w *teststringwriter) WriteString(s string) (int, error) {
+	w.writeString += s
+	return len(s), nil
+}
+
+func (w *teststringwriter) check(t *testing.T, write, writeString string) {
+	t.Helper()
+	if w.write != write {
+		t.Errorf("write: expected %q, got %q", write, w.write)
+	}
+	if w.writeString != writeString {
+		t.Errorf("writeString: expected %q, got %q", writeString, w.writeString)
 	}
 }
 
@@ -1520,7 +1581,7 @@ func TestReaderDiscard(t *testing.T) {
 			wantBuffered: 0,
 		},
 		// Any error from filling shouldn't show up until we
-		// get past the valid bytes. Here we return we return 5 valid bytes at the same time
+		// get past the valid bytes. Here we return 5 valid bytes at the same time
 		// as an error, but test that we don't see the error from Discard.
 		{
 			name: "fill error, discard less",

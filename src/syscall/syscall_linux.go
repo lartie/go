@@ -16,6 +16,78 @@ import (
 	"unsafe"
 )
 
+// N.B. RawSyscall6 is provided via linkname by runtime/internal/syscall.
+//
+// Errno is uintptr and thus compatible with the runtime/internal/syscall
+// definition.
+
+func RawSyscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno)
+
+// Pull in entersyscall/exitsyscall for Syscall/Syscall6.
+//
+// Note that this can't be a push linkname because the runtime already has a
+// nameless linkname to export to assembly here and in x/sys. Additionally,
+// entersyscall fetches the caller PC and SP and thus can't have a wrapper
+// inbetween.
+
+//go:linkname runtime_entersyscall runtime.entersyscall
+func runtime_entersyscall()
+//go:linkname runtime_exitsyscall runtime.exitsyscall
+func runtime_exitsyscall()
+
+// N.B. For the Syscall functions below:
+//
+// //go:uintptrkeepalive because the uintptr argument may be converted pointers
+// that need to be kept alive in the caller (this is implied for RawSyscall6
+// since it has no body).
+//
+// //go:nosplit because stack copying does not account for uintptrkeepalive, so
+// the stack must not grow. Stack copying cannot blindly assume that all
+// uintptr arguments are pointers, because some values may look like pointers,
+// but not really be pointers, and adjusting their value would break the call.
+//
+// //go:linkname to ensure ABI wrappers are generated for external callers
+// (notably x/sys/unix assembly).
+
+//go:uintptrkeepalive
+//go:nosplit
+//go:linkname RawSyscall
+func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
+	return RawSyscall6(trap, a1, a2, a3, 0, 0, 0)
+}
+
+//go:uintptrkeepalive
+//go:nosplit
+//go:linkname Syscall
+func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
+	runtime_entersyscall()
+	// N.B. Calling RawSyscall here is unsafe with atomic coverage
+	// instrumentation and race mode.
+	//
+	// Coverage instrumentation will add a sync/atomic call to RawSyscall.
+	// Race mode will add race instrumentation to sync/atomic. Race
+	// instrumentation requires a P, which we no longer have.
+	//
+	// RawSyscall6 is fine because it is implemented in assembly and thus
+	// has no coverage instrumentation.
+	//
+	// This is typically not a problem in the runtime because cmd/go avoids
+	// adding coverage instrumentation to the runtime in race mode.
+	r1, r2, err = RawSyscall6(trap, a1, a2, a3, 0, 0, 0)
+	runtime_exitsyscall()
+	return
+}
+
+//go:uintptrkeepalive
+//go:nosplit
+//go:linkname Syscall6
+func Syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno) {
+	runtime_entersyscall()
+	r1, r2, err = RawSyscall6(trap, a1, a2, a3, a4, a5, a6)
+	runtime_exitsyscall()
+	return
+}
+
 func rawSyscallNoError(trap, a1, a2, a3 uintptr) (r1, r2 uintptr)
 
 /*
@@ -109,7 +181,7 @@ func Faccessat(dirfd int, path string, mode uint32, flags int) (err error) {
 			gid = Getgid()
 		}
 
-		if uint32(gid) == st.Gid || isGroupMember(gid) {
+		if uint32(gid) == st.Gid || isGroupMember(int(st.Gid)) {
 			fmode = (st.Mode >> 3) & 7
 		} else {
 			fmode = st.Mode & 7
@@ -173,8 +245,10 @@ func Pipe2(p []int, flags int) error {
 	}
 	var pp [2]_C_int
 	err := pipe2(&pp, flags)
-	p[0] = int(pp[0])
-	p[1] = int(pp[1])
+	if err == nil {
+		p[0] = int(pp[0])
+		p[1] = int(pp[1])
+	}
 	return err
 }
 
@@ -251,6 +325,13 @@ func Getwd() (wd string, err error) {
 	if n < 1 || n > len(buf) || buf[n-1] != 0 {
 		return "", EINVAL
 	}
+	// In some cases, Linux can return a path that starts with the
+	// "(unreachable)" prefix, which can potentially be a valid relative
+	// path. To work around that, return ENOENT if path is not absolute.
+	if buf[0] != '/' {
+		return "", ENOENT
+	}
+
 	return string(buf[0 : n-1]), nil
 }
 
@@ -638,10 +719,9 @@ func SetsockoptIPMreqn(fd, level, opt int, mreq *IPMreqn) (err error) {
 	return setsockopt(fd, level, opt, unsafe.Pointer(mreq), unsafe.Sizeof(*mreq))
 }
 
-func Recvmsg(fd int, p, oob []byte, flags int) (n, oobn int, recvflags int, from Sockaddr, err error) {
+func recvmsgRaw(fd int, p, oob []byte, flags int, rsa *RawSockaddrAny) (n, oobn int, recvflags int, err error) {
 	var msg Msghdr
-	var rsa RawSockaddrAny
-	msg.Name = (*byte)(unsafe.Pointer(&rsa))
+	msg.Name = (*byte)(unsafe.Pointer(rsa))
 	msg.Namelen = uint32(SizeofSockaddrAny)
 	var iov Iovec
 	if len(p) > 0 {
@@ -672,28 +752,10 @@ func Recvmsg(fd int, p, oob []byte, flags int) (n, oobn int, recvflags int, from
 	}
 	oobn = int(msg.Controllen)
 	recvflags = int(msg.Flags)
-	// source address is only specified if the socket is unconnected
-	if rsa.Addr.Family != AF_UNSPEC {
-		from, err = anyToSockaddr(&rsa)
-	}
 	return
 }
 
-func Sendmsg(fd int, p, oob []byte, to Sockaddr, flags int) (err error) {
-	_, err = SendmsgN(fd, p, oob, to, flags)
-	return
-}
-
-func SendmsgN(fd int, p, oob []byte, to Sockaddr, flags int) (n int, err error) {
-	var ptr unsafe.Pointer
-	var salen _Socklen
-	if to != nil {
-		var err error
-		ptr, salen, err = to.sockaddr()
-		if err != nil {
-			return 0, err
-		}
-	}
+func sendmsgN(fd int, p, oob []byte, ptr unsafe.Pointer, salen _Socklen, flags int) (n int, err error) {
 	var msg Msghdr
 	msg.Name = (*byte)(ptr)
 	msg.Namelen = uint32(salen)
@@ -975,62 +1037,12 @@ func Getpgrp() (pid int) {
 //sysnb	Setsid() (pid int, err error)
 //sysnb	Settimeofday(tv *Timeval) (err error)
 
-// allThreadsCaller holds the input and output state for performing a
-// allThreadsSyscall that needs to synchronize all OS thread state. Linux
-// generally does not always support this natively, so we have to
-// manipulate the runtime to fix things up.
-type allThreadsCaller struct {
-	// arguments
-	trap, a1, a2, a3, a4, a5, a6 uintptr
-
-	// return values (only set by 0th invocation)
-	r1, r2 uintptr
-
-	// err is the error code
-	err Errno
-}
-
-// doSyscall is a callback for executing a syscall on the current m
-// (OS thread).
-//go:nosplit
-//go:norace
-func (pc *allThreadsCaller) doSyscall(initial bool) bool {
-	r1, r2, err := RawSyscall(pc.trap, pc.a1, pc.a2, pc.a3)
-	if initial {
-		pc.r1 = r1
-		pc.r2 = r2
-		pc.err = err
-	} else if pc.r1 != r1 || (archHonorsR2 && pc.r2 != r2) || pc.err != err {
-		print("trap:", pc.trap, ", a123=[", pc.a1, ",", pc.a2, ",", pc.a3, "]\n")
-		print("results: got {r1=", r1, ",r2=", r2, ",err=", err, "}, want {r1=", pc.r1, ",r2=", pc.r2, ",r3=", pc.err, "}\n")
-		panic("AllThreadsSyscall results differ between threads; runtime corrupted")
-	}
-	return err == 0
-}
-
-// doSyscall6 is a callback for executing a syscall6 on the current m
-// (OS thread).
-//go:nosplit
-//go:norace
-func (pc *allThreadsCaller) doSyscall6(initial bool) bool {
-	r1, r2, err := RawSyscall6(pc.trap, pc.a1, pc.a2, pc.a3, pc.a4, pc.a5, pc.a6)
-	if initial {
-		pc.r1 = r1
-		pc.r2 = r2
-		pc.err = err
-	} else if pc.r1 != r1 || (archHonorsR2 && pc.r2 != r2) || pc.err != err {
-		print("trap:", pc.trap, ", a123456=[", pc.a1, ",", pc.a2, ",", pc.a3, ",", pc.a4, ",", pc.a5, ",", pc.a6, "]\n")
-		print("results: got {r1=", r1, ",r2=", r2, ",err=", err, "}, want {r1=", pc.r1, ",r2=", pc.r2, ",r3=", pc.err, "}\n")
-		panic("AllThreadsSyscall6 results differ between threads; runtime corrupted")
-	}
-	return err == 0
-}
-
-// Provided by runtime.syscall_runtime_doAllThreadsSyscall which
-// serializes the world and invokes the fn on each OS thread (what the
-// runtime refers to as m's). Once this function returns, all threads
-// are in sync.
-func runtime_doAllThreadsSyscall(fn func(bool) bool)
+// Provided by runtime.syscall_runtime_doAllThreadsSyscall which stops the
+// world and invokes the syscall on each OS thread. Once this function returns,
+// all threads are in sync.
+//
+//go:uintptrescapes
+func runtime_doAllThreadsSyscall(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2, err uintptr)
 
 // AllThreadsSyscall performs a syscall on each OS thread of the Go
 // runtime. It first invokes the syscall on one thread. Should that
@@ -1047,48 +1059,30 @@ func runtime_doAllThreadsSyscall(fn func(bool) bool)
 // AllThreadsSyscall is unaware of any threads that are launched
 // explicitly by cgo linked code, so the function always returns
 // ENOTSUP in binaries that use cgo.
+//
 //go:uintptrescapes
 func AllThreadsSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno) {
 	if cgo_libc_setegid != nil {
 		return minus1, minus1, ENOTSUP
 	}
-	pc := &allThreadsCaller{
-		trap: trap,
-		a1:   a1,
-		a2:   a2,
-		a3:   a3,
-	}
-	runtime_doAllThreadsSyscall(pc.doSyscall)
-	r1 = pc.r1
-	r2 = pc.r2
-	err = pc.err
-	return
+	r1, r2, errno := runtime_doAllThreadsSyscall(trap, a1, a2, a3, 0, 0, 0)
+	return r1, r2, Errno(errno)
 }
 
 // AllThreadsSyscall6 is like AllThreadsSyscall, but extended to six
 // arguments.
+//
 //go:uintptrescapes
 func AllThreadsSyscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno) {
 	if cgo_libc_setegid != nil {
 		return minus1, minus1, ENOTSUP
 	}
-	pc := &allThreadsCaller{
-		trap: trap,
-		a1:   a1,
-		a2:   a2,
-		a3:   a3,
-		a4:   a4,
-		a5:   a5,
-		a6:   a6,
-	}
-	runtime_doAllThreadsSyscall(pc.doSyscall6)
-	r1 = pc.r1
-	r2 = pc.r2
-	err = pc.err
-	return
+	r1, r2, errno := runtime_doAllThreadsSyscall(trap, a1, a2, a3, a4, a5, a6)
+	return r1, r2, Errno(errno)
 }
 
 // linked by runtime.cgocall.go
+//
 //go:uintptrescapes
 func cgocaller(unsafe.Pointer, ...uintptr) uintptr
 

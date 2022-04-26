@@ -656,15 +656,16 @@ outer:
 // It decomposes a Load or an Arg into smaller parts and returns the new mem.
 // If the type does not match one of the expected aggregate types, it returns nil instead.
 // Parameters:
-//  pos           -- the location of any generated code.
-//  b             -- the block into which any generated code should normally be placed
-//  source        -- the value, possibly an aggregate, to be stored.
-//  mem           -- the mem flowing into this decomposition (loads depend on it, stores updated it)
-//  t             -- the type of the value to be stored
-//  storeOffset   -- if the value is stored in memory, it is stored at base (see storeRc) + storeOffset
-//  loadRegOffset -- regarding source as a value in registers, the register offset in ABI1.  Meaningful only if source is OpArg.
-//  storeRc       -- storeRC; if the value is stored in registers, this specifies the registers.
-//                   StoreRc also identifies whether the target is registers or memory, and has the base for the store operation.
+//
+//	pos           -- the location of any generated code.
+//	b             -- the block into which any generated code should normally be placed
+//	source        -- the value, possibly an aggregate, to be stored.
+//	mem           -- the mem flowing into this decomposition (loads depend on it, stores updated it)
+//	t             -- the type of the value to be stored
+//	storeOffset   -- if the value is stored in memory, it is stored at base (see storeRc) + storeOffset
+//	loadRegOffset -- regarding source as a value in registers, the register offset in ABI1.  Meaningful only if source is OpArg.
+//	storeRc       -- storeRC; if the value is stored in registers, this specifies the registers.
+//	                 StoreRc also identifies whether the target is registers or memory, and has the base for the store operation.
 func (x *expandState) decomposeArg(pos src.XPos, b *Block, source, mem *Value, t *types.Type, storeOffset int64, loadRegOffset Abi1RO, storeRc registerCursor) *Value {
 
 	pa := x.prAssignForArg(source)
@@ -777,15 +778,16 @@ func (x *expandState) splitSlotsIntoNames(locs []*LocalSlot, suffix string, off 
 // It decomposes a Load  into smaller parts and returns the new mem.
 // If the type does not match one of the expected aggregate types, it returns nil instead.
 // Parameters:
-//  pos           -- the location of any generated code.
-//  b             -- the block into which any generated code should normally be placed
-//  source        -- the value, possibly an aggregate, to be stored.
-//  mem           -- the mem flowing into this decomposition (loads depend on it, stores updated it)
-//  t             -- the type of the value to be stored
-//  storeOffset   -- if the value is stored in memory, it is stored at base (see storeRc) + offset
-//  loadRegOffset -- regarding source as a value in registers, the register offset in ABI1.  Meaningful only if source is OpArg.
-//  storeRc       -- storeRC; if the value is stored in registers, this specifies the registers.
-//                   StoreRc also identifies whether the target is registers or memory, and has the base for the store operation.
+//
+//	pos           -- the location of any generated code.
+//	b             -- the block into which any generated code should normally be placed
+//	source        -- the value, possibly an aggregate, to be stored.
+//	mem           -- the mem flowing into this decomposition (loads depend on it, stores updated it)
+//	t             -- the type of the value to be stored
+//	storeOffset   -- if the value is stored in memory, it is stored at base (see storeRc) + offset
+//	loadRegOffset -- regarding source as a value in registers, the register offset in ABI1.  Meaningful only if source is OpArg.
+//	storeRc       -- storeRC; if the value is stored in registers, this specifies the registers.
+//	                 StoreRc also identifies whether the target is registers or memory, and has the base for the store operation.
 //
 // TODO -- this needs cleanup; it just works for SSA-able aggregates, and won't fully generalize to register-args aggregates.
 func (x *expandState) decomposeLoad(pos src.XPos, b *Block, source, mem *Value, t *types.Type, storeOffset int64, loadRegOffset Abi1RO, storeRc registerCursor) *Value {
@@ -958,6 +960,7 @@ func (x *expandState) storeArgOrLoad(pos src.XPos, b *Block, source, mem *Value,
 			return x.storeArgOrLoad(pos, b, source, mem, t, storeOffset, loadRegOffset, storeRc)
 		}
 		eltRO := x.regWidth(elt)
+		source.Type = t
 		for i := int64(0); i < t.NumElem(); i++ {
 			sel := source.Block.NewValue1I(pos, OpArraySelect, elt, i, source)
 			mem = x.storeArgOrLoad(pos, b, sel, mem, elt, storeOffset+i*elt.Size(), loadRegOffset, storeRc.at(t, 0))
@@ -991,6 +994,7 @@ func (x *expandState) storeArgOrLoad(pos src.XPos, b *Block, source, mem *Value,
 			return x.storeArgOrLoad(pos, b, source, mem, t, storeOffset, loadRegOffset, storeRc)
 		}
 
+		source.Type = t
 		for i := 0; i < t.NumFields(); i++ {
 			fld := t.Field(i)
 			sel := source.Block.NewValue1I(pos, OpStructSelect, fld.Type, int64(i), source)
@@ -1104,7 +1108,7 @@ func (x *expandState) rewriteArgs(v *Value, firstArg int) {
 				a0 := a.Args[0]
 				if a0.Op == OpLocalAddr {
 					n := a0.Aux.(*ir.Name)
-					if n.Class == ir.PPARAM && n.FrameOffset()+x.f.Config.ctxt.FixedFrameSize() == aOffset {
+					if n.Class == ir.PPARAM && n.FrameOffset()+x.f.Config.ctxt.Arch.FixedFrameSize == aOffset {
 						continue
 					}
 				}
@@ -1125,7 +1129,7 @@ func (x *expandState) rewriteArgs(v *Value, firstArg int) {
 				// It's common for a tail call passing the same arguments (e.g. method wrapper),
 				// so this would be a self copy. Detect this and optimize it out.
 				n := a.Aux.(*ir.Name)
-				if n.Class == ir.PPARAM && n.FrameOffset()+x.f.Config.ctxt.FixedFrameSize() == aOffset {
+				if n.Class == ir.PPARAM && n.FrameOffset()+x.f.Config.ctxt.Arch.FixedFrameSize == aOffset {
 					continue
 				}
 			}

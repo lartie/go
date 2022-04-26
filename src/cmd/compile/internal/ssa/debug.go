@@ -34,6 +34,9 @@ type FuncDebug struct {
 	VarSlots [][]SlotID
 	// The location list data, indexed by VarID. Must be processed by PutLocationList.
 	LocationLists [][]byte
+	// Register-resident output parameters for the function. This is filled in at
+	// SSA generation time.
+	RegOutputParams []*ir.Name
 
 	// Filled in by the user. Translates Block and Value ID to PC.
 	GetPC func(ID, ID) int64
@@ -399,33 +402,32 @@ func (sc *slotCanonicalizer) canonSlot(idx SlKeyIdx) LocalSlot {
 // OpArg{Int,Float}Reg values, inserting additional values in
 // cases where they are missing. Example:
 //
-//      func foo(s string, used int, notused int) int {
-//        return len(s) + used
-//      }
+//	func foo(s string, used int, notused int) int {
+//	  return len(s) + used
+//	}
 //
 // In the function above, the incoming parameter "used" is fully live,
 // "notused" is not live, and "s" is partially live (only the length
 // field of the string is used). At the point where debug value
 // analysis runs, we might expect to see an entry block with:
 //
-//   b1:
-//     v4 = ArgIntReg <uintptr> {s+8} [0] : BX
-//     v5 = ArgIntReg <int> {used} [0] : CX
+//	b1:
+//	  v4 = ArgIntReg <uintptr> {s+8} [0] : BX
+//	  v5 = ArgIntReg <int> {used} [0] : CX
 //
 // While this is an accurate picture of the live incoming params,
 // we also want to have debug locations for non-live params (or
 // their non-live pieces), e.g. something like
 //
-//   b1:
-//     v9 = ArgIntReg <*uint8> {s+0} [0] : AX
-//     v4 = ArgIntReg <uintptr> {s+8} [0] : BX
-//     v5 = ArgIntReg <int> {used} [0] : CX
-//     v10 = ArgIntReg <int> {unused} [0] : DI
+//	b1:
+//	  v9 = ArgIntReg <*uint8> {s+0} [0] : AX
+//	  v4 = ArgIntReg <uintptr> {s+8} [0] : BX
+//	  v5 = ArgIntReg <int> {used} [0] : CX
+//	  v10 = ArgIntReg <int> {unused} [0] : DI
 //
 // This function examines the live OpArg{Int,Float}Reg values and
 // synthesizes new (dead) values for the non-live params or the
 // non-live pieces of partially live params.
-//
 func PopulateABIInRegArgOps(f *Func) {
 	pri := f.ABISelf.ABIAnalyzeFuncType(f.Type.FuncType())
 
@@ -548,10 +550,10 @@ func PopulateABIInRegArgOps(f *Func) {
 	f.Entry.Values = append(newValues, f.Entry.Values...)
 }
 
-// BuildFuncDebug returns debug information for f.
+// BuildFuncDebug debug information for f, placing the results in "rval".
 // f must be fully processed, so that each Value is where it will be when
 // machine code is emitted.
-func BuildFuncDebug(ctxt *obj.Link, f *Func, loggingEnabled bool, stackOffset func(LocalSlot) int32) *FuncDebug {
+func BuildFuncDebug(ctxt *obj.Link, f *Func, loggingEnabled bool, stackOffset func(LocalSlot) int32, rval *FuncDebug) {
 	if f.RegAlloc == nil {
 		f.Fatalf("BuildFuncDebug on func %v that has not been fully processed", f)
 	}
@@ -661,12 +663,11 @@ func BuildFuncDebug(ctxt *obj.Link, f *Func, loggingEnabled bool, stackOffset fu
 	blockLocs := state.liveness()
 	state.buildLocationLists(blockLocs)
 
-	return &FuncDebug{
-		Slots:         state.slots,
-		VarSlots:      state.varSlots,
-		Vars:          state.vars,
-		LocationLists: state.lists,
-	}
+	// Populate "rval" with what we've computed.
+	rval.Slots = state.slots
+	rval.VarSlots = state.varSlots
+	rval.Vars = state.vars
+	rval.LocationLists = state.lists
 }
 
 // liveness walks the function in control flow order, calculating the start
@@ -1120,54 +1121,93 @@ func (state *debugState) buildLocationLists(blockLocs []*BlockDebug) {
 				v.Op == OpArgIntReg || v.Op == OpArgFloatReg
 		}
 
+		blockPrologComplete := func(v *Value) bool {
+			if b.ID != state.f.Entry.ID {
+				return !opcodeTable[v.Op].zeroWidth
+			} else {
+				return v.Op == OpInitMem
+			}
+		}
+
+		// Examine the prolog portion of the block to process special
+		// zero-width ops such as Arg, Phi, LoweredGetClosurePtr (etc)
+		// whose lifetimes begin at the block starting point. In an
+		// entry block, allow for the possibility that we may see Arg
+		// ops that appear _after_ other non-zero-width operations.
+		// Example:
+		//
+		//   v33 = ArgIntReg <uintptr> {foo+0} [0] : AX (foo)
+		//   v34 = ArgIntReg <uintptr> {bar+0} [0] : BX (bar)
+		//   ...
+		//   v77 = StoreReg <unsafe.Pointer> v67 : ctx+8[unsafe.Pointer]
+		//   v78 = StoreReg <unsafe.Pointer> v68 : ctx[unsafe.Pointer]
+		//   v79 = Arg <*uint8> {args} : args[*uint8] (args[*uint8])
+		//   v80 = Arg <int> {args} [8] : args+8[int] (args+8[int])
+		//   ...
+		//   v1 = InitMem <mem>
+		//
+		// We can stop scanning the initial portion of the block when
+		// we either see the InitMem op (for entry blocks) or the
+		// first non-zero-width op (for other blocks).
+		for idx := 0; idx < len(b.Values); idx++ {
+			v := b.Values[idx]
+			if blockPrologComplete(v) {
+				break
+			}
+			// Consider only "lifetime begins at block start" ops.
+			if !mustBeFirst(v) && v.Op != OpArg {
+				continue
+			}
+			slots := state.valueNames[v.ID]
+			reg, _ := state.f.getHome(v.ID).(*Register)
+			changed := state.processValue(v, slots, reg) // changed == added to state.changedVars
+			if changed {
+				for _, varID := range state.changedVars.contents() {
+					state.updateVar(VarID(varID), v.Block, BlockStart)
+				}
+				state.changedVars.clear()
+			}
+		}
+
+		// Now examine the block again, handling things other than the
+		// "begins at block start" lifetimes.
 		zeroWidthPending := false
-		blockPrologComplete := false // set to true at first non-zero-width op
-		apcChangedSize := 0          // size of changedVars for leading Args, Phi, ClosurePtr
+		prologComplete := false
 		// expect to see values in pattern (apc)* (zerowidth|real)*
 		for _, v := range b.Values {
+			if blockPrologComplete(v) {
+				prologComplete = true
+			}
 			slots := state.valueNames[v.ID]
 			reg, _ := state.f.getHome(v.ID).(*Register)
 			changed := state.processValue(v, slots, reg) // changed == added to state.changedVars
 
 			if opcodeTable[v.Op].zeroWidth {
+				if prologComplete && mustBeFirst(v) {
+					panic(fmt.Errorf("Unexpected placement of op '%s' appearing after non-pseudo-op at beginning of block %s in %s\n%s", v.LongString(), b, b.Func.Name, b.Func))
+				}
 				if changed {
 					if mustBeFirst(v) || v.Op == OpArg {
-						// These ranges begin at true beginning of block, not after first instruction
-						if blockPrologComplete && mustBeFirst(v) {
-							panic(fmt.Errorf("Unexpected placement of op '%s' appearing after non-pseudo-op at beginning of block %s in %s\n%s", v.LongString(), b, b.Func.Name, b.Func))
-						}
-						apcChangedSize = len(state.changedVars.contents())
-						// Other zero-width ops must wait on a "real" op.
-						zeroWidthPending = true
+						// already taken care of above
 						continue
 					}
+					zeroWidthPending = true
 				}
 				continue
 			}
-
 			if !changed && !zeroWidthPending {
 				continue
 			}
-			// Not zero-width; i.e., a "real" instruction.
 
+			// Not zero-width; i.e., a "real" instruction.
 			zeroWidthPending = false
-			blockPrologComplete = true
-			for i, varID := range state.changedVars.contents() {
-				if i < apcChangedSize { // buffered true start-of-block changes
-					state.updateVar(VarID(varID), v.Block, BlockStart)
-				} else {
-					state.updateVar(VarID(varID), v.Block, v)
-				}
+			for _, varID := range state.changedVars.contents() {
+				state.updateVar(VarID(varID), v.Block, v)
 			}
 			state.changedVars.clear()
-			apcChangedSize = 0
 		}
-		for i, varID := range state.changedVars.contents() {
-			if i < apcChangedSize { // buffered true start-of-block changes
-				state.updateVar(VarID(varID), b, BlockStart)
-			} else {
-				state.updateVar(VarID(varID), b, BlockEnd)
-			}
+		for _, varID := range state.changedVars.contents() {
+			state.updateVar(VarID(varID), b, BlockEnd)
 		}
 
 		prevBlock = b
@@ -1449,14 +1489,14 @@ func setupLocList(ctxt *obj.Link, f *Func, list []byte, st, en ID) ([]byte, int)
 // that spills a register arg. It returns the ID of that instruction
 // Example:
 //
-//   b1:
-//       v3 = ArgIntReg <int> {p1+0} [0] : AX
-//       ... more arg regs ..
-//       v4 = ArgFloatReg <float32> {f1+0} [0] : X0
-//       v52 = MOVQstore <mem> {p1} v2 v3 v1
-//       ... more stores ...
-//       v68 = MOVSSstore <mem> {f4} v2 v67 v66
-//       v38 = MOVQstoreconst <mem> {blob} [val=0,off=0] v2 v32
+//	b1:
+//	    v3 = ArgIntReg <int> {p1+0} [0] : AX
+//	    ... more arg regs ..
+//	    v4 = ArgFloatReg <float32> {f1+0} [0] : X0
+//	    v52 = MOVQstore <mem> {p1} v2 v3 v1
+//	    ... more stores ...
+//	    v68 = MOVSSstore <mem> {f4} v2 v67 v66
+//	    v38 = MOVQstoreconst <mem> {blob} [val=0,off=0] v2 v32
 //
 // Important: locatePrologEnd is expected to work properly only with
 // optimization turned off (e.g. "-N"). If optimization is enabled
@@ -1554,7 +1594,7 @@ func isNamedRegParam(p abi.ABIParamAssignment) bool {
 	return true
 }
 
-// BuildFuncDebugNoOptimized constructs a FuncDebug object with
+// BuildFuncDebugNoOptimized populates a FuncDebug object "rval" with
 // entries corresponding to the register-resident input parameters for
 // the function "f"; it is used when we are compiling without
 // optimization but the register ABI is enabled. For each reg param,
@@ -1562,8 +1602,7 @@ func isNamedRegParam(p abi.ABIParamAssignment) bool {
 // the input register, and the second element holds the stack location
 // of the param (the assumption being that when optimization is off,
 // each input param reg will be spilled in the prolog.
-func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, stackOffset func(LocalSlot) int32) *FuncDebug {
-	fd := FuncDebug{}
+func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, stackOffset func(LocalSlot) int32, rval *FuncDebug) {
 
 	pri := f.ABISelf.ABIAnalyzeFuncType(f.Type.FuncType())
 
@@ -1577,7 +1616,7 @@ func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, sta
 		}
 	}
 	if numRegParams == 0 {
-		return &fd
+		return
 	}
 
 	state := debugState{f: f}
@@ -1587,7 +1626,7 @@ func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, sta
 	}
 
 	// Allocate location lists.
-	fd.LocationLists = make([][]byte, numRegParams)
+	rval.LocationLists = make([][]byte, numRegParams)
 
 	// Locate the value corresponding to the last spill of
 	// an input register.
@@ -1603,10 +1642,10 @@ func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, sta
 
 		n := inp.Name.(*ir.Name)
 		sl := LocalSlot{N: n, Type: inp.Type, Off: 0}
-		fd.Vars = append(fd.Vars, n)
-		fd.Slots = append(fd.Slots, sl)
-		slid := len(fd.VarSlots)
-		fd.VarSlots = append(fd.VarSlots, []SlotID{SlotID(slid)})
+		rval.Vars = append(rval.Vars, n)
+		rval.Slots = append(rval.Slots, sl)
+		slid := len(rval.VarSlots)
+		rval.VarSlots = append(rval.VarSlots, []SlotID{SlotID(slid)})
 
 		if afterPrologVal == ID(-1) {
 			// This can happen for degenerate functions with infinite
@@ -1623,7 +1662,7 @@ func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, sta
 		// Param is arriving in one or more registers. We need a 2-element
 		// location expression for it. First entry in location list
 		// will correspond to lifetime in input registers.
-		list, sizeIdx := setupLocList(ctxt, f, fd.LocationLists[pidx],
+		list, sizeIdx := setupLocList(ctxt, f, rval.LocationLists[pidx],
 			BlockStart.ID, afterPrologVal)
 		if list == nil {
 			pidx++
@@ -1688,8 +1727,7 @@ func BuildFuncDebugNoOptimized(ctxt *obj.Link, f *Func, loggingEnabled bool, sta
 		// fill in size
 		ctxt.Arch.ByteOrder.PutUint16(list[sizeIdx:], uint16(len(list)-sizeIdx-2))
 
-		fd.LocationLists[pidx] = list
+		rval.LocationLists[pidx] = list
 		pidx++
 	}
-	return &fd
 }

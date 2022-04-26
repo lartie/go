@@ -13,7 +13,13 @@ import (
 	"sync"
 )
 
-func errorf(format string, args ...interface{}) {
+func assert(b bool) {
+	if !b {
+		panic("assertion failed")
+	}
+}
+
+func errorf(format string, args ...any) {
 	panic(fmt.Sprintf(format, args...))
 }
 
@@ -134,13 +140,27 @@ var predeclared = []types.Type{
 	types.Typ[types.Invalid], // only appears in packages with errors
 
 	// used internally by gc; never used by this package or in .a files
+	// not to be confused with the universe any
 	anyType{},
 
 	// comparable
 	types.Universe.Lookup("comparable").Type(),
+
+	// any
+	types.Universe.Lookup("any").Type(),
 }
 
 type anyType struct{}
 
 func (t anyType) Underlying() types.Type { return t }
 func (t anyType) String() string         { return "any" }
+
+type derivedInfo struct {
+	idx    int
+	needed bool
+}
+
+type typeInfo struct {
+	idx     int
+	derived bool
+}

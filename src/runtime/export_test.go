@@ -75,7 +75,7 @@ func Netpoll(delta int64) {
 	})
 }
 
-func GCMask(x interface{}) (ret []byte) {
+func GCMask(x any) (ret []byte) {
 	systemstack(func() {
 		ret = getgcmask(x)
 	})
@@ -85,6 +85,7 @@ func GCMask(x interface{}) (ret []byte) {
 func RunSchedLocalQueueTest() {
 	_p_ := new(p)
 	gs := make([]g, len(_p_.runq))
+	escape(gs) // Ensure gs doesn't move, since we use guintptrs
 	for i := 0; i < len(_p_.runq); i++ {
 		if g, _ := runqget(_p_); g != nil {
 			throw("runq is not empty initially")
@@ -108,6 +109,7 @@ func RunSchedLocalQueueStealTest() {
 	p1 := new(p)
 	p2 := new(p)
 	gs := make([]g, len(p1.runq))
+	escape(gs) // Ensure gs doesn't move, since we use guintptrs
 	for i := 0; i < len(p1.runq); i++ {
 		for j := 0; j < i; j++ {
 			gs[j].sig = 0
@@ -155,6 +157,7 @@ func RunSchedLocalQueueEmptyTest(iters int) {
 	done := make(chan bool, 1)
 	p := new(p)
 	gs := make([]g, 2)
+	escape(gs) // Ensure gs doesn't move, since we use guintptrs
 	ready := new(uint32)
 	for i := 0; i < iters; i++ {
 		*ready = 0
@@ -218,7 +221,7 @@ func SetEnvs(e []string) { envs = e }
 
 // For benchmarking.
 
-func BenchSetType(n int, x interface{}) {
+func BenchSetType(n int, x any) {
 	e := *efaceOf(&x)
 	t := e._type
 	var size uintptr
@@ -277,6 +280,7 @@ func CountPagesInUse() (pagesInUse, counted uintptr) {
 }
 
 func Fastrand() uint32          { return fastrand() }
+func Fastrand64() uint64        { return fastrand64() }
 func Fastrandn(n uint32) uint32 { return fastrandn(n) }
 
 type ProfBuf profBuf
@@ -546,7 +550,7 @@ func MapTombstoneCheck(m map[int]int) {
 	// We should have a series of filled and emptyOne cells, followed by
 	// a series of emptyRest cells.
 	h := *(**hmap)(unsafe.Pointer(&m))
-	i := interface{}(m)
+	i := any(m)
 	t := *(**maptype)(unsafe.Pointer(&i))
 
 	for x := 0; x < 1<<h.B; x++ {
@@ -796,21 +800,17 @@ func (p *PageAlloc) Free(base, npages uintptr) {
 		// None of the tests need any higher-level locking, so we just
 		// take the lock internally.
 		lock(pp.mheapLock)
-		pp.free(base, npages)
+		pp.free(base, npages, true)
 		unlock(pp.mheapLock)
 	})
 }
 func (p *PageAlloc) Bounds() (ChunkIdx, ChunkIdx) {
 	return ChunkIdx((*pageAlloc)(p).start), ChunkIdx((*pageAlloc)(p).end)
 }
-func (p *PageAlloc) Scavenge(nbytes uintptr, mayUnlock bool) (r uintptr) {
+func (p *PageAlloc) Scavenge(nbytes uintptr) (r uintptr) {
 	pp := (*pageAlloc)(p)
 	systemstack(func() {
-		// None of the tests need any higher-level locking, so we just
-		// take the lock internally.
-		lock(pp.mheapLock)
-		r = pp.scavenge(nbytes, mayUnlock)
-		unlock(pp.mheapLock)
+		r = pp.scavenge(nbytes)
 	})
 	return
 }
@@ -1052,7 +1052,19 @@ func FreePageAlloc(pp *PageAlloc) {
 //
 // This should not be higher than 0x100*pallocChunkBytes to support
 // mips and mipsle, which only have 31-bit address spaces.
-var BaseChunkIdx = ChunkIdx(chunkIndex(((0xc000*pageAlloc64Bit + 0x100*pageAlloc32Bit) * pallocChunkBytes) + arenaBaseOffset*goos.IsAix))
+var BaseChunkIdx = func() ChunkIdx {
+	var prefix uintptr
+	if pageAlloc64Bit != 0 {
+		prefix = 0xc000
+	} else {
+		prefix = 0x100
+	}
+	baseAddr := prefix * pallocChunkBytes
+	if goos.IsAix != 0 {
+		baseAddr += arenaBaseOffset
+	}
+	return ChunkIdx(chunkIndex(baseAddr))
+}()
 
 // PageBase returns an address given a chunk index and a page index
 // relative to that chunk.
@@ -1135,6 +1147,7 @@ func SemNwait(addr *uint32) uint32 {
 }
 
 // mspan wrapper for testing.
+//
 //go:notinheap
 type MSpan mspan
 
@@ -1191,6 +1204,8 @@ func (th *TimeHistogram) Record(duration int64) {
 	(*timeHistogram)(th).record(duration)
 }
 
+var TimeHistogramMetricsBuckets = timeHistogramMetricsBuckets
+
 func SetIntArgRegs(a int) int {
 	lock(&finlock)
 	old := intArgRegs
@@ -1245,7 +1260,7 @@ func NewGCController(gcPercent int) *GCController {
 	// do 64-bit atomics on it, and if it gets stack-allocated
 	// on a 32-bit architecture, it may get allocated unaligned
 	// space.
-	g := escape(new(GCController)).(*GCController)
+	g := escape(new(GCController))
 	g.gcControllerState.test = true // Mark it as a test copy.
 	g.init(int32(gcPercent))
 	return g
@@ -1256,7 +1271,7 @@ func (c *GCController) StartCycle(stackSize, globalsSize uint64, scannableFrac f
 	c.globalsScan = globalsSize
 	c.heapLive = c.trigger
 	c.heapScan += uint64(float64(c.trigger-c.heapMarked) * scannableFrac)
-	c.startCycle(0, gomaxprocs)
+	c.startCycle(0, gomaxprocs, gcTrigger{kind: gcTriggerHeap})
 }
 
 func (c *GCController) AssistWorkPerByte() float64 {
@@ -1290,22 +1305,174 @@ type GCControllerReviseDelta struct {
 func (c *GCController) Revise(d GCControllerReviseDelta) {
 	c.heapLive += uint64(d.HeapLive)
 	c.heapScan += uint64(d.HeapScan)
-	c.scanWork += d.HeapScanWork + d.StackScanWork + d.GlobalsScanWork
+	c.heapScanWork.Add(d.HeapScanWork)
+	c.stackScanWork.Add(d.StackScanWork)
+	c.globalsScanWork.Add(d.GlobalsScanWork)
 	c.revise()
 }
 
 func (c *GCController) EndCycle(bytesMarked uint64, assistTime, elapsed int64, gomaxprocs int) {
 	c.assistTime = assistTime
-	triggerRatio := c.endCycle(elapsed, gomaxprocs, false)
+	c.endCycle(elapsed, gomaxprocs, false)
 	c.resetLive(bytesMarked)
-	c.commit(triggerRatio)
+	c.commit()
 }
 
-var escapeSink interface{}
+func (c *GCController) AddIdleMarkWorker() bool {
+	return c.addIdleMarkWorker()
+}
+
+func (c *GCController) NeedIdleMarkWorker() bool {
+	return c.needIdleMarkWorker()
+}
+
+func (c *GCController) RemoveIdleMarkWorker() {
+	c.removeIdleMarkWorker()
+}
+
+func (c *GCController) SetMaxIdleMarkWorkers(max int32) {
+	c.setMaxIdleMarkWorkers(max)
+}
+
+var escapeSink any
 
 //go:noinline
-func escape(x interface{}) interface{} {
+//go:norace
+func escape[T any](x T) T {
 	escapeSink = x
 	escapeSink = nil
 	return x
+}
+
+// Acquirem blocks preemption.
+func Acquirem() {
+	acquirem()
+}
+
+func Releasem() {
+	releasem(getg().m)
+}
+
+var Timediv = timediv
+
+type PIController struct {
+	piController
+}
+
+func NewPIController(kp, ti, tt, min, max float64) *PIController {
+	return &PIController{piController{
+		kp:  kp,
+		ti:  ti,
+		tt:  tt,
+		min: min,
+		max: max,
+	}}
+}
+
+func (c *PIController) Next(input, setpoint, period float64) (float64, bool) {
+	return c.piController.next(input, setpoint, period)
+}
+
+const ScavengePercent = scavengePercent
+
+type Scavenger struct {
+	Sleep      func(int64) int64
+	Scavenge   func(uintptr) (uintptr, int64)
+	ShouldStop func() bool
+	GoMaxProcs func() int32
+
+	released  atomic.Uintptr
+	scavenger scavengerState
+	stop      chan<- struct{}
+	done      <-chan struct{}
+}
+
+func (s *Scavenger) Start() {
+	if s.Sleep == nil || s.Scavenge == nil || s.ShouldStop == nil || s.GoMaxProcs == nil {
+		panic("must populate all stubs")
+	}
+
+	// Install hooks.
+	s.scavenger.sleepStub = s.Sleep
+	s.scavenger.scavenge = s.Scavenge
+	s.scavenger.shouldStop = s.ShouldStop
+	s.scavenger.gomaxprocs = s.GoMaxProcs
+
+	// Start up scavenger goroutine, and wait for it to be ready.
+	stop := make(chan struct{})
+	s.stop = stop
+	done := make(chan struct{})
+	s.done = done
+	go func() {
+		// This should match bgscavenge, loosely.
+		s.scavenger.init()
+		s.scavenger.park()
+		for {
+			select {
+			case <-stop:
+				close(done)
+				return
+			default:
+			}
+			released, workTime := s.scavenger.run()
+			if released == 0 {
+				s.scavenger.park()
+				continue
+			}
+			s.released.Add(released)
+			s.scavenger.sleep(workTime)
+		}
+	}()
+	if !s.BlockUntilParked(1e9 /* 1 second */) {
+		panic("timed out waiting for scavenger to get ready")
+	}
+}
+
+// BlockUntilParked blocks until the scavenger parks, or until
+// timeout is exceeded. Returns true if the scavenger parked.
+//
+// Note that in testing, parked means something slightly different.
+// In anger, the scavenger parks to sleep, too, but in testing,
+// it only parks when it actually has no work to do.
+func (s *Scavenger) BlockUntilParked(timeout int64) bool {
+	// Just spin, waiting for it to park.
+	//
+	// The actual parking process is racy with respect to
+	// wakeups, which is fine, but for testing we need something
+	// a bit more robust.
+	start := nanotime()
+	for nanotime()-start < timeout {
+		lock(&s.scavenger.lock)
+		parked := s.scavenger.parked
+		unlock(&s.scavenger.lock)
+		if parked {
+			return true
+		}
+		Gosched()
+	}
+	return false
+}
+
+// Released returns how many bytes the scavenger released.
+func (s *Scavenger) Released() uintptr {
+	return s.released.Load()
+}
+
+// Wake wakes up a parked scavenger to keep running.
+func (s *Scavenger) Wake() {
+	s.scavenger.wake()
+}
+
+// Stop cleans up the scavenger's resources. The scavenger
+// must be parked for this to work.
+func (s *Scavenger) Stop() {
+	lock(&s.scavenger.lock)
+	parked := s.scavenger.parked
+	unlock(&s.scavenger.lock)
+	if !parked {
+		panic("tried to clean up scavenger that is not parked")
+	}
+	close(s.stop)
+	s.Wake()
+	<-s.done
 }
