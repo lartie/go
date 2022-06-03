@@ -27,6 +27,7 @@ import (
 var (
 	goarch           string
 	gorootBin        string
+	gorootBinGo      string
 	gohostarch       string
 	gohostos         string
 	goos             string
@@ -64,6 +65,7 @@ var okgoarch = []string{
 	"amd64",
 	"arm",
 	"arm64",
+	"loong64",
 	"mips",
 	"mipsle",
 	"mips64",
@@ -113,6 +115,12 @@ func xinit() {
 	}
 	goroot = filepath.Clean(b)
 	gorootBin = pathf("%s/bin", goroot)
+
+	// Don't run just 'go' because the build infrastructure
+	// runs cmd/dist inside go/bin often, and on Windows
+	// it will be found in the current directory and refuse to exec.
+	// All exec calls rewrite "go" into gorootBinGo.
+	gorootBinGo = pathf("%s/bin/go", goroot)
 
 	b = os.Getenv("GOROOT_FINAL")
 	if b == "" {
@@ -1554,6 +1562,7 @@ var cgoEnabled = map[string]bool{
 	"linux/amd64":     true,
 	"linux/arm":       true,
 	"linux/arm64":     true,
+	"linux/loong64":   true,
 	"linux/ppc64":     false,
 	"linux/ppc64le":   true,
 	"linux/mips":      true,
@@ -1621,7 +1630,13 @@ func checkCC() {
 	if !needCC() {
 		return
 	}
-	if output, err := exec.Command(defaultcc[""], "--help").CombinedOutput(); err != nil {
+	cc, err := quotedSplit(defaultcc[""])
+	if err != nil {
+		fatalf("split CC: %v", err)
+	}
+	var ccHelp = append(cc, "--help")
+
+	if output, err := exec.Command(ccHelp[0], ccHelp[1:]...).CombinedOutput(); err != nil {
 		outputHdr := ""
 		if len(output) > 0 {
 			outputHdr = "\nCommand output:\n\n"
@@ -1629,7 +1644,7 @@ func checkCC() {
 		fatalf("cannot invoke C compiler %q: %v\n\n"+
 			"Go needs a system C compiler for use with cgo.\n"+
 			"To set a C compiler, set CC=the-compiler.\n"+
-			"To disable cgo, set CGO_ENABLED=0.\n%s%s", defaultcc[""], err, outputHdr, output)
+			"To disable cgo, set CGO_ENABLED=0.\n%s%s", cc, err, outputHdr, output)
 	}
 }
 

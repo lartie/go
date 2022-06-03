@@ -50,6 +50,20 @@ Do not send CLs removing the interior tags from such phrases.
   with <code>-trimpath</code>.
 </p>
 
+<p><!-- CL 404134 -->
+  <code>go</code> <code>test</code> and <code>go</code> <code>generate</code> now place
+  <code>GOROOT/bin</code> at the beginning of the <code>PATH</code> used for the
+  subprocess, so tests and generators that execute the <code>go</code> command
+  will resolve it to same <code>GOROOT</code>.
+</p>
+
+<p><!-- CL 398058 -->
+  <code>go</code> <code>env</code> now quotes entries that contain spaces in
+  the <code>CGO_CFLAGS</code>, <code>CGO_CPPFLAGS</code>, <code>CGO_CXXFLAGS</code>, <code>CGO_FFLAGS</code>, <code>CGO_LDFLAGS</code>,
+  and <code>GOGCCFLAGS</code> variables it reports.
+</p>
+
+
 <h4 id="go-unix">New <code>unix</code> build constraint</h4>
 
 <p><!-- CL 389934 -->
@@ -71,6 +85,21 @@ Do not send CLs removing the interior tags from such phrases.
   TODO: complete this section, or delete if not needed
 </p>
 <h2 id="compiler">Compiler</h2>
+
+<p><!-- https://go.dev/issue/5496 CL 357330, 395714, 403979 -->
+  The compiler now uses
+  a <a href="https://en.wikipedia.org/wiki/Branch_table">jump
+  table</a> to implement large integer and string switch statements.
+  Performance improvements for the switch statement vary but can be
+  on the order of 20% faster.
+  (<code>GOARCH=amd64</code> and <code>GOARCH=arm64</code> only)
+</p>
+<p>
+  TODO: <a href="https://go.dev/cl/402374">https://go.dev/cl/402374</a>: enable regabi on riscv64 by default
+</p>
+<p>
+  TODO: <a href="https://go.dev/cl/391014">https://go.dev/cl/391014</a>: The Go compiler now requires the -p=importpath flag, which is already supplied by the go command and by Bazel. Any other build systems that invoke the Go compiler directly will need to make sure they pass this flag as well in order to use Go 1.19.: cmd/compile: require -p flag
+</p>
 <p>
   TODO: complete this section, or delete if not needed
 </p>
@@ -92,6 +121,88 @@ Do not send CLs removing the interior tags from such phrases.
   TODO: complete this section
 </p>
 
+<dl id="archive/zip"><dt><a href="/pkg/archive/zip/">archive/zip</a></dt>
+  <dd>
+    <p><!-- CL 387976 -->
+      TODO: <a href="https://go.dev/cl/387976">https://go.dev/cl/387976</a>: permit zip files to have prefixes
+    </p>
+  </dd>
+</dl><!-- archive/zip -->
+
+<dl id="crypto/rand"><dt><a href="/pkg/crypto/rand/">crypto/rand</a></dt>
+  <dd>
+    <p><!-- CL 370894 -->
+      TODO: <a href="https://go.dev/cl/370894">https://go.dev/cl/370894</a>: batch and buffer calls to getrandom/getentropy
+    </p>
+
+    <p><!-- CL 375215 -->
+      TODO: <a href="https://go.dev/cl/375215">https://go.dev/cl/375215</a>: use fast key erasure RNG on plan9 instead of ANSI X9.31
+    </p>
+
+    <p><!-- CL 390038 -->
+      TODO: <a href="https://go.dev/cl/390038">https://go.dev/cl/390038</a>: remove all buffering
+    </p>
+  </dd>
+</dl><!-- crypto/rand -->
+
+<dl id="crypto/tls"><dt><a href="/pkg/crypto/tls/">crypto/tls</a></dt>
+  <dd>
+    <p><!-- CL 400974 -->
+      The <code>tls10default</code> <code>GODEBUG</code> option has been
+      removed. It is still possible to enable TLS 1.0 client-side by setting
+      <code>Config.MinVersion</code>.
+    </p>
+  </dd>
+</dl><!-- crypto/tls -->
+
+<dl id="crypto/x509"><dt><a href="/pkg/crypto/x509/">crypto/x509</a></dt>
+  <dd>
+    <p><!-- CL 285872 -->
+      TODO: <a href="https://go.dev/cl/285872">https://go.dev/cl/285872</a>: disable signing with MD5WithRSA
+    </p>
+  </dd>
+</dl><!-- crypto/x509 -->
+
+<dl id="encoding/binary"><dt><a href="/pkg/encoding/binary/">encoding/binary</a></dt>
+  <dd>
+    <p><!-- CL 386017 -->
+      TODO: <a href="https://go.dev/cl/386017">https://go.dev/cl/386017</a>: add AppendByteOrder
+    </p>
+  </dd>
+</dl><!-- encoding/binary -->
+
+<dl id="encoding/csv"><dt><a href="/pkg/encoding/csv/">encoding/csv</a></dt>
+  <dd>
+    <p><!-- CL 405675 -->
+      TODO: <a href="https://go.dev/cl/405675">https://go.dev/cl/405675</a>: add Reader.InputOffset method
+    </p>
+  </dd>
+</dl><!-- encoding/csv -->
+
+<dl id="flag"><dt><a href="/pkg/flag/">flag</a></dt>
+  <dd>
+    <p><!-- CL 313329 -->
+      TODO: <a href="https://go.dev/cl/313329">https://go.dev/cl/313329</a>: add TextVar function
+    </p>
+  </dd>
+</dl><!-- flag -->
+
+<dl id="fmt"><dt><a href="/pkg/fmt/">fmt</a></dt>
+  <dd>
+    <p><!-- CL 406177 -->
+      TODO: <a href="https://go.dev/cl/406177">https://go.dev/cl/406177</a>: add Append, Appendln, Appendf
+    </p>
+  </dd>
+</dl><!-- fmt -->
+
+<dl id="go/parser"><dt><a href="/pkg/go/parser/">go/parser</a></dt>
+  <dd>
+    <p><!-- CL 403696 -->
+      TODO: <a href="https://go.dev/cl/403696">https://go.dev/cl/403696</a>: parser to accept ~x as unary expression
+    </p>
+  </dd>
+</dl><!-- go/parser -->
+
 <dl id="image/draw"><dt><a href="/pkg/image/draw/">image/draw</a></dt>
   <dd>
     <p><!-- CL 396795 -->
@@ -103,6 +214,34 @@ Do not send CLs removing the interior tags from such phrases.
     </p>
   </dd>
 </dl><!-- image/draw -->
+
+<dl id="io"><dt><a href="/pkg/io/">io</a></dt>
+  <dd>
+    <p><!-- CL 396215 -->
+      TODO: <a href="https://go.dev/cl/396215">https://go.dev/cl/396215</a>: add an Err field to LimitedReader
+    </p>
+
+    <p><!-- CL 400236 -->
+      TODO: <a href="https://go.dev/cl/400236">https://go.dev/cl/400236</a>: NopCloser forward WriterTo implementations if the reader supports it
+    </p>
+  </dd>
+</dl><!-- io -->
+
+<dl id="mime"><dt><a href="/pkg/mime/">mime</a></dt>
+  <dd>
+    <p><!-- CL 406894 -->
+      On Windows only, the mime package now ignores a registry entry
+      recording that the extension <code>.js</code> should have MIME
+      type <code>text/plain</code>. This is a common unintentional
+      misconfiguration on Windows systems. The effect is
+      that <code>.js</code> will have the default MIME
+      type <code>text/javascript; charset=utf-8</code>.
+      Applications that expect <code>text/plain</code> on Windows must
+      now explicitly call
+      <a href="/pkg/mime#AddExtensionType"><code>AddExtensionType</code></a>.
+    </p>
+  </dd>
+</dl>
 
 <dl id="net"><dt><a href="/pkg/net/">net</a></dt>
   <dd>
@@ -125,12 +264,42 @@ Do not send CLs removing the interior tags from such phrases.
       returns an "operation was canceled" error, the error will now
       satisfy <code>errors.Is(err, context.Canceled)</code>.
       These changes are intended to make it easier for code to test
-      for cases in which a context cancelation or timeout causes a net
+      for cases in which a context cancellation or timeout causes a net
       package function or method to return an error, while preserving
       backward compatibility for error messages.
     </p>
   </dd>
+  <dd>
+    <p><!-- CL 400654 -->
+      TODO: <a href="https://go.dev/cl/400654">https://go.dev/cl/400654</a>: permit use of Resolver.PreferGo, netgo on Windows and Plan 9
+    </p>
+  </dd>
 </dl><!-- net -->
+
+<dl id="net/http"><dt><a href="/pkg/net/http/">net/http</a></dt>
+  <dd>
+    <p><!-- CL 269997 -->
+      TODO: <a href="https://go.dev/cl/269997">https://go.dev/cl/269997</a>: allow sending 1xx responses
+    </p>
+  </dd>
+</dl><!-- net/http -->
+
+<dl id="net/url"><dt><a href="/pkg/net/url/">net/url</a></dt>
+  <dd>
+    <p><!-- CL 374654 -->
+      TODO: <a href="https://go.dev/cl/374654">https://go.dev/cl/374654</a>: add JoinPath, URL.JoinPath
+    </p>
+  </dd>
+</dl><!-- net/url -->
+
+<dl id="os"><dt><a href="/pkg/os/">os</a></dt>
+  <dd>
+    <p><!-- CL 392415 -->
+      TODO: <a href="https://go.dev/cl/392415">https://go.dev/cl/392415</a>: raise open file rlimit at startup
+    </p>
+  </dd>
+</dl><!-- os -->
+
 
 <dl id="os/exec"><dt><a href="/pkg/os/exec/">os/exec</a></dt>
   <dd><!-- https://go.dev/issue/50599 -->
@@ -147,6 +316,17 @@ Do not send CLs removing the interior tags from such phrases.
   </dd>
 </dl> <!-- os/exec -->
 
+<dl id="reflect"><dt><a href="/pkg/reflect/">reflect</a></dt>
+  <dd>
+    <p><!-- CL 357331 -->
+      The method <a href="/pkg/reflect/#Value.Bytes"><code>Value.Bytes</code></a> now accepts addressable arrays in addition to slices.
+    </p>
+    <p><!-- CL 400954 -->
+      The methods <a href="/pkg/reflect/#Value.Len"><code>Value.Len</code></a> and <a href="/pkg/reflect/#Value.Cap"><code>Value.Cap</code></a> now successfully operate on a pointer to an array and return the length of that array, to match what the <a href="https://go.dev/ref/spec#Length_and_capacity">builtin <code>len</code> and <code>cap</code> functions do</a>.
+    </p>
+  </dd>
+</dl><!-- reflect -->
+
 <dl id="runtime"><dt><a href="/pkg/runtime/">runtime</a></dt>
   <dd>
     <p><!-- https://go.dev/issue/51461 -->
@@ -158,12 +338,60 @@ Do not send CLs removing the interior tags from such phrases.
   </dd>
 </dl><!-- runtime -->
 
+<dl id="runtime/race"><dt><a href="/pkg/runtime/race/">runtime/race</a></dt>
+  <dd>
+    <p><!-- https://go.dev/issue/49761 --><!-- CL 333529 -->
+      The race detector has been upgraded to use thread sanitizer
+      version v3.
+      <ul>
+        <li>
+          Faster (typically 1.5 to 2 times faster)
+        </li>
+        <li>
+          Uses less memory (typically 1/2 as much)
+        </li>
+        <li>
+          Supports unlimited numbers of goroutines
+        </li>
+      </ul>
+    </p>
+  </dd>
+</dl><!-- runtime/race -->
+
+<dl id="runtime/trace"><dt><a href="/pkg/runtime/trace/">runtime/trace</a></dt>
+  <dd>
+    <p><!-- CL 400795 -->
+      When used together with the
+      <a href="/pkg/runtime/pprof#StartCPUProfile">CPU profiler</a>, the
+      execution trace includes CPU profile samples.
+    </p>
+  </dd>
+</dl><!-- runtime/trace -->
+
+<dl id="sort"><dt><a href="/pkg/sort/">sort</a></dt>
+  <dd>
+    <p><!-- CL 371574 -->
+      The sorting algorithm has been rewritten to use
+      <a href="https://arxiv.org/pdf/2106.05123.pdf">pattern-defeating quicksort</a>, which
+      is faster for several common scenarios.
+    </p>
+  </dd>
+</dl><!-- sort -->
+
 <dl id="strconv"><dt><a href="/pkg/strconv/">strconv</a></dt>
   <dd>
     <p><!-- CL 397255 -->
-      <a href="/pkg/strconv/#strconv.Quote"><code>strconv.Quote</code></a>
+      <a href="/pkg/strconv/#Quote"><code>Quote</code></a>
       and related functions now quote the rune 007F as <code>\x7f</code>,
       not <code>\u007f</code>.
     </p>
   </dd>
 </dl><!-- strconv -->
+
+<dl id="time"><dt><a href="/pkg/time/">time</a></dt>
+  <dd>
+    <p><!-- CL 393515 -->
+      TODO: <a href="https://go.dev/cl/393515">https://go.dev/cl/393515</a>: add Duration.Abs
+    </p>
+  </dd>
+</dl><!-- time -->
