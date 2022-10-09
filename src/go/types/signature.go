@@ -5,6 +5,7 @@
 package types
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 )
@@ -41,16 +42,18 @@ func NewSignature(recv *Var, params, results *Tuple, variadic bool) *Signature {
 // NewSignatureType creates a new function type for the given receiver,
 // receiver type parameters, type parameters, parameters, and results. If
 // variadic is set, params must hold at least one parameter and the last
-// parameter must be of unnamed slice type. If recv is non-nil, typeParams must
-// be empty. If recvTypeParams is non-empty, recv must be non-nil.
+// parameter's core type must be of unnamed slice or bytestring type.
+// If recv is non-nil, typeParams must be empty. If recvTypeParams is
+// non-empty, recv must be non-nil.
 func NewSignatureType(recv *Var, recvTypeParams, typeParams []*TypeParam, params, results *Tuple, variadic bool) *Signature {
 	if variadic {
 		n := params.Len()
 		if n == 0 {
 			panic("variadic function must have at least one parameter")
 		}
-		if _, ok := params.At(n - 1).typ.(*Slice); !ok {
-			panic("variadic parameter must be of unnamed slice type")
+		core := coreString(params.At(n - 1).typ)
+		if _, ok := core.(*Slice); !ok && !isString(core) {
+			panic(fmt.Sprintf("got %s, want variadic parameter with unnamed slice type or string as core type", core.String()))
 		}
 	}
 	sig := &Signature{recv: recv, params: params, results: results, variadic: variadic}
@@ -150,7 +153,7 @@ func (check *Checker) funcType(sig *Signature, recvPar *ast.FieldList, ftyp *ast
 					// recvTPar.bound is (possibly) parameterized in the context of the
 					// receiver type declaration. Substitute parameters for the current
 					// context.
-					tpar.bound = check.subst(tpar.obj.pos, recvTPar.bound, smap, nil)
+					tpar.bound = check.subst(tpar.obj.pos, recvTPar.bound, smap, nil, check.context())
 				}
 			} else if len(tparams) < len(recvTParams) {
 				// Reporting an error here is a stop-gap measure to avoid crashes in the
@@ -196,7 +199,7 @@ func (check *Checker) funcType(sig *Signature, recvPar *ast.FieldList, ftyp *ast
 			recv = NewParam(token.NoPos, nil, "", Typ[Invalid]) // ignore recv below
 		default:
 			// more than one receiver
-			check.error(recvList[len(recvList)-1], _InvalidRecv, "method must have exactly one receiver")
+			check.error(recvList[len(recvList)-1], _InvalidRecv, "method has multiple receivers")
 			fallthrough // continue with first receiver
 		case 1:
 			recv = recvList[0]

@@ -177,6 +177,37 @@ func hasSubdir(root, dir string) (rel string, ok bool) {
 	return filepath.ToSlash(dir[len(root):]), true
 }
 
+// gopath returns the list of Go path directories.
+func (ctxt *Context) gopath() []string {
+	var all []string
+	for _, p := range ctxt.splitPathList(ctxt.GOPATH) {
+		if p == "" || p == ctxt.GOROOT {
+			// Empty paths are uninteresting.
+			// If the path is the GOROOT, ignore it.
+			// People sometimes set GOPATH=$GOROOT.
+			// Do not get confused by this common mistake.
+			continue
+		}
+		if strings.HasPrefix(p, "~") {
+			// Path segments starting with ~ on Unix are almost always
+			// users who have incorrectly quoted ~ while setting GOPATH,
+			// preventing it from expanding to $HOME.
+			// The situation is made more confusing by the fact that
+			// bash allows quoted ~ in $PATH (most shells do not).
+			// Do not get confused by this, and do not try to use the path.
+			// It does not exist, and printing errors about it confuses
+			// those users even more, because they think "sure ~ exists!".
+			// The go command diagnoses this situation and prints a
+			// useful error.
+			// On Windows, ~ is used in short names, such as c:\progra~1
+			// for c:\program files.
+			continue
+		}
+		all = append(all, p)
+	}
+	return all
+}
+
 var defaultToolTags, defaultReleaseTags []string
 
 // A Package describes the Go package found in a directory.
@@ -446,6 +477,8 @@ type fileEmbed struct {
 	pos     token.Position
 }
 
+var errNonSource = errors.New("non source file")
+
 // getFileInfo extracts the information needed from each go file for the module
 // index.
 //
@@ -453,6 +486,9 @@ type fileEmbed struct {
 // Imports and returns that section of the file in the FileInfo's Header field,
 // even though it only considers text until the first non-comment
 // for +build lines.
+//
+// getFileInfo will return errNonSource if the file is not a source or object
+// file and shouldn't even be added to IgnoredFiles.
 func getFileInfo(dir, name string, fset *token.FileSet) (*fileInfo, error) {
 	if strings.HasPrefix(name, "_") ||
 		strings.HasPrefix(name, ".") {
@@ -467,7 +503,7 @@ func getFileInfo(dir, name string, fset *token.FileSet) (*fileInfo, error) {
 
 	if ext != ".go" && fileListForExt(&dummyPkg, ext) == nil {
 		// skip
-		return nil, nil
+		return nil, errNonSource
 	}
 
 	info := &fileInfo{name: filepath.Join(dir, name), fset: fset}
@@ -527,8 +563,7 @@ var (
 
 	goBuildComment = []byte("//go:build")
 
-	errGoBuildWithoutBuild = errors.New("//go:build comment without // +build comment")
-	errMultipleGoBuild     = errors.New("multiple //go:build comments")
+	errMultipleGoBuild = errors.New("multiple //go:build comments")
 )
 
 func isGoBuildComment(line []byte) bool {
@@ -887,8 +922,8 @@ func (ctxt *Context) eval(x constraint.Expr, allTags map[string]bool) bool {
 //	$GOARCH
 //	boringcrypto
 //	ctxt.Compiler
-//	linux (if GOOS = android)
-//	solaris (if GOOS = illumos)
+//	linux (if GOOS == android)
+//	solaris (if GOOS == illumos)
 //	tag (if tag is listed in ctxt.BuildTags or ctxt.ReleaseTags)
 //
 // It records all consulted tags in allTags.

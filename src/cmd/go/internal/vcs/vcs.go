@@ -253,7 +253,7 @@ var vcsGit = &Cmd{
 
 // scpSyntaxRe matches the SCP-like addresses used by Git to access
 // repositories by SSH.
-var scpSyntaxRe = lazyregexp.New(`^([a-zA-Z0-9_]+)@([a-zA-Z0-9._-]+):(.*)$`)
+var scpSyntaxRe = lazyregexp.New(`^(\w+)@([\w.-]+):(.*)$`)
 
 func gitRemoteRepo(vcsGit *Cmd, rootDir string) (remoteRepo string, err error) {
 	cmd := "config remote.origin.url"
@@ -561,7 +561,7 @@ func fossilStatus(vcsFossil *Cmd, rootDir string) (Status, error) {
 	}
 	rev := checkout[:i]
 
-	commitTime, err := time.ParseInLocation("2006-01-02 15:04:05", checkout[i+1:], time.UTC)
+	commitTime, err := time.ParseInLocation(time.DateTime, checkout[i+1:], time.UTC)
 	if err != nil {
 		return Status{}, fmt.Errorf("%v: %v", errFossilInfo, err)
 	}
@@ -880,11 +880,11 @@ func parseGOVCS(s string) (govcsConfig, error) {
 		if item == "" {
 			return nil, fmt.Errorf("empty entry in GOVCS")
 		}
-		i := strings.Index(item, ":")
-		if i < 0 {
+		pattern, list, found := strings.Cut(item, ":")
+		if !found {
 			return nil, fmt.Errorf("malformed entry in GOVCS (missing colon): %q", item)
 		}
-		pattern, list := strings.TrimSpace(item[:i]), strings.TrimSpace(item[i+1:])
+		pattern, list = strings.TrimSpace(pattern), strings.TrimSpace(list)
 		if pattern == "" {
 			return nil, fmt.Errorf("empty pattern in GOVCS: %q", item)
 		}
@@ -1438,7 +1438,7 @@ var vcsPaths = []*vcsPath{
 	// GitHub
 	{
 		pathPrefix: "github.com",
-		regexp:     lazyregexp.New(`^(?P<root>github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*$`),
+		regexp:     lazyregexp.New(`^(?P<root>github\.com/[\w.\-]+/[\w.\-]+)(/[\w.\-]+)*$`),
 		vcs:        "git",
 		repo:       "https://{root}",
 		check:      noVCSSuffix,
@@ -1447,7 +1447,7 @@ var vcsPaths = []*vcsPath{
 	// Bitbucket
 	{
 		pathPrefix: "bitbucket.org",
-		regexp:     lazyregexp.New(`^(?P<root>bitbucket\.org/(?P<bitname>[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+))(/[A-Za-z0-9_.\-]+)*$`),
+		regexp:     lazyregexp.New(`^(?P<root>bitbucket\.org/(?P<bitname>[\w.\-]+/[\w.\-]+))(/[\w.\-]+)*$`),
 		vcs:        "git",
 		repo:       "https://{root}",
 		check:      noVCSSuffix,
@@ -1456,7 +1456,7 @@ var vcsPaths = []*vcsPath{
 	// IBM DevOps Services (JazzHub)
 	{
 		pathPrefix: "hub.jazz.net/git",
-		regexp:     lazyregexp.New(`^(?P<root>hub\.jazz\.net/git/[a-z0-9]+/[A-Za-z0-9_.\-]+)(/[A-Za-z0-9_.\-]+)*$`),
+		regexp:     lazyregexp.New(`^(?P<root>hub\.jazz\.net/git/[a-z0-9]+/[\w.\-]+)(/[\w.\-]+)*$`),
 		vcs:        "git",
 		repo:       "https://{root}",
 		check:      noVCSSuffix,
@@ -1465,7 +1465,7 @@ var vcsPaths = []*vcsPath{
 	// Git at Apache
 	{
 		pathPrefix: "git.apache.org",
-		regexp:     lazyregexp.New(`^(?P<root>git\.apache\.org/[a-z0-9_.\-]+\.git)(/[A-Za-z0-9_.\-]+)*$`),
+		regexp:     lazyregexp.New(`^(?P<root>git\.apache\.org/[a-z0-9_.\-]+\.git)(/[\w.\-]+)*$`),
 		vcs:        "git",
 		repo:       "https://{root}",
 	},
@@ -1473,7 +1473,7 @@ var vcsPaths = []*vcsPath{
 	// Git at OpenStack
 	{
 		pathPrefix: "git.openstack.org",
-		regexp:     lazyregexp.New(`^(?P<root>git\.openstack\.org/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)(\.git)?(/[A-Za-z0-9_.\-]+)*$`),
+		regexp:     lazyregexp.New(`^(?P<root>git\.openstack\.org/[\w.\-]+/[\w.\-]+)(\.git)?(/[\w.\-]+)*$`),
 		vcs:        "git",
 		repo:       "https://{root}",
 	},
@@ -1481,7 +1481,7 @@ var vcsPaths = []*vcsPath{
 	// chiselapp.com for fossil
 	{
 		pathPrefix: "chiselapp.com",
-		regexp:     lazyregexp.New(`^(?P<root>chiselapp\.com/user/[A-Za-z0-9]+/repository/[A-Za-z0-9_.\-]+)$`),
+		regexp:     lazyregexp.New(`^(?P<root>chiselapp\.com/user/[A-Za-z0-9]+/repository/[\w.\-]+)$`),
 		vcs:        "fossil",
 		repo:       "https://{root}",
 	},
@@ -1489,7 +1489,7 @@ var vcsPaths = []*vcsPath{
 	// General syntax for any server.
 	// Must be last.
 	{
-		regexp:         lazyregexp.New(`(?P<root>(?P<repo>([a-z0-9.\-]+\.)+[a-z0-9.\-]+(:[0-9]+)?(/~?[A-Za-z0-9_.\-]+)+?)\.(?P<vcs>bzr|fossil|git|hg|svn))(/~?[A-Za-z0-9_.\-]+)*$`),
+		regexp:         lazyregexp.New(`(?P<root>(?P<repo>([a-z0-9.\-]+\.)+[a-z0-9.\-]+(:[0-9]+)?(/~?[\w.\-]+)+?)\.(?P<vcs>bzr|fossil|git|hg|svn))(/~?[\w.\-]+)*$`),
 		schemelessRepo: true,
 	},
 }
@@ -1502,7 +1502,7 @@ var vcsPathsAfterDynamic = []*vcsPath{
 	// Launchpad. See golang.org/issue/11436.
 	{
 		pathPrefix: "launchpad.net",
-		regexp:     lazyregexp.New(`^(?P<root>launchpad\.net/((?P<project>[A-Za-z0-9_.\-]+)(?P<series>/[A-Za-z0-9_.\-]+)?|~[A-Za-z0-9_.\-]+/(\+junk|[A-Za-z0-9_.\-]+)/[A-Za-z0-9_.\-]+))(/[A-Za-z0-9_.\-]+)*$`),
+		regexp:     lazyregexp.New(`^(?P<root>launchpad\.net/((?P<project>[\w.\-]+)(?P<series>/[\w.\-]+)?|~[\w.\-]+/(\+junk|[\w.\-]+)/[\w.\-]+))(/[\w.\-]+)*$`),
 		vcs:        "bzr",
 		repo:       "https://{root}",
 		check:      launchpadVCS,

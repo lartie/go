@@ -8,6 +8,7 @@ import (
 	"cmd/internal/sys"
 	"fmt"
 	"internal/buildcfg"
+	"internal/platform"
 )
 
 // A BuildMode indicates the sort of object we are building.
@@ -185,7 +186,7 @@ func mustLinkExternal(ctxt *Link) (res bool, reason string) {
 		}()
 	}
 
-	if sys.MustLinkExternal(buildcfg.GOOS, buildcfg.GOARCH) {
+	if platform.MustLinkExternal(buildcfg.GOOS, buildcfg.GOARCH) {
 		return true, fmt.Sprintf("%s/%s requires external linking", buildcfg.GOOS, buildcfg.GOARCH)
 	}
 
@@ -244,6 +245,15 @@ func mustLinkExternal(ctxt *Link) (res bool, reason string) {
 
 	if unknownObjFormat {
 		return true, "some input objects have an unrecognized file format"
+	}
+
+	if len(dynimportfail) > 0 {
+		// This error means that we were unable to generate
+		// the _cgo_import.go file for some packages.
+		// This typically means that there are some dependencies
+		// that the cgo tool could not figure out.
+		// See issue #52863.
+		return true, fmt.Sprintf("some packages could not be built to support internal linking (%v)", dynimportfail)
 	}
 
 	return false, ""

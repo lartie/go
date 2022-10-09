@@ -1282,6 +1282,7 @@ var defaultLocTests = []struct {
 	{"After", func(t1, t2 Time) bool { return t1.After(t2) == t2.After(t1) }},
 	{"Before", func(t1, t2 Time) bool { return t1.Before(t2) == t2.Before(t1) }},
 	{"Equal", func(t1, t2 Time) bool { return t1.Equal(t2) == t2.Equal(t1) }},
+	{"Compare", func(t1, t2 Time) bool { return t1.Compare(t2) == t2.Compare(t1) }},
 
 	{"IsZero", func(t1, t2 Time) bool { return t1.IsZero() == t2.IsZero() }},
 	{"Date", func(t1, t2 Time) bool {
@@ -1402,6 +1403,20 @@ func BenchmarkFormat(b *testing.B) {
 	}
 }
 
+func BenchmarkFormatRFC3339(b *testing.B) {
+	t := Unix(1265346057, 0)
+	for i := 0; i < b.N; i++ {
+		t.Format("2006-01-02T15:04:05Z07:00")
+	}
+}
+
+func BenchmarkFormatRFC3339Nano(b *testing.B) {
+	t := Unix(1265346057, 0)
+	for i := 0; i < b.N; i++ {
+		t.Format("2006-01-02T15:04:05.999999999Z07:00")
+	}
+}
+
 func BenchmarkFormatNow(b *testing.B) {
 	// Like BenchmarkFormat, but easier, because the time zone
 	// lookup cache is optimized for the present.
@@ -1428,6 +1443,38 @@ func BenchmarkMarshalText(b *testing.B) {
 func BenchmarkParse(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		Parse(ANSIC, "Mon Jan  2 15:04:05 2006")
+	}
+}
+
+const testdataRFC3339UTC = "2020-08-22T11:27:43.123456789Z"
+
+func BenchmarkParseRFC3339UTC(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		Parse(RFC3339, testdataRFC3339UTC)
+	}
+}
+
+var testdataRFC3339UTCBytes = []byte(testdataRFC3339UTC)
+
+func BenchmarkParseRFC3339UTCBytes(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		Parse(RFC3339, string(testdataRFC3339UTCBytes))
+	}
+}
+
+const testdataRFC3339TZ = "2020-08-22T11:27:43.123456789-02:00"
+
+func BenchmarkParseRFC3339TZ(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		Parse(RFC3339, testdataRFC3339TZ)
+	}
+}
+
+var testdataRFC3339TZBytes = []byte(testdataRFC3339TZ)
+
+func BenchmarkParseRFC3339TZBytes(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		Parse(RFC3339, string(testdataRFC3339TZBytes))
 	}
 }
 
@@ -1470,6 +1517,21 @@ func BenchmarkISOWeek(b *testing.B) {
 	t := Now()
 	for i := 0; i < b.N; i++ {
 		_, _ = t.ISOWeek()
+	}
+}
+
+func BenchmarkGoString(b *testing.B) {
+	t := Now()
+	for i := 0; i < b.N; i++ {
+		_ = t.GoString()
+	}
+}
+
+func BenchmarkUnmarshalText(b *testing.B) {
+	var t Time
+	in := []byte("2020-08-22T11:27:43.123456789-02:00")
+	for i := 0; i < b.N; i++ {
+		t.UnmarshalText(in)
 	}
 }
 
@@ -1516,6 +1578,16 @@ func TestMarshalBinaryVersion2(t *testing.T) {
 		if !t1.Equal(t2) {
 			t.Errorf("The result t2: %+v after Unmarshal is not matched original t1: %+v", t2, t1)
 		}
+	}
+}
+
+func TestUnmarshalTextAllocations(t *testing.T) {
+	in := []byte(testdataRFC3339UTC) // short enough to be stack allocated
+	if allocs := testing.AllocsPerRun(100, func() {
+		var t Time
+		t.UnmarshalText(in)
+	}); allocs != 0 {
+		t.Errorf("got %v allocs, want 0 allocs", allocs)
 	}
 }
 

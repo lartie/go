@@ -125,7 +125,7 @@ environment variable when running the go tool: set it to 1 to enable
 the use of cgo, and to 0 to disable it. The go tool will set the
 build constraint "cgo" if cgo is enabled. The special import "C"
 implies the "cgo" build constraint, as though the file also said
-"// +build cgo".  Therefore, if cgo is disabled, files that import
+"//go:build cgo".  Therefore, if cgo is disabled, files that import
 "C" will not be built by the go tool. (For more about build constraints
 see https://golang.org/pkg/go/build/#hdr-Build_Constraints).
 
@@ -752,6 +752,16 @@ presented to cmd/link as part of a larger program, contains:
 
 	_go_.o        # gc-compiled object for _cgo_gotypes.go, _cgo_import.go, *.cgo1.go
 	_all.o        # gcc-compiled object for _cgo_export.c, *.cgo2.c
+
+If there is an error generating the _cgo_import.go file, then, instead
+of adding _cgo_import.go to the package, the go tool adds an empty
+file named dynimportfail. The _cgo_import.go file is only needed when
+using internal linking mode, which is not the default when linking
+programs that use cgo (as described below). If the linker sees a file
+named dynimportfail it reports an error if it has been told to use
+internal linking mode. This approach is taken because generating
+_cgo_import.go requires doing a full C link of the package, which can
+fail for reasons that are irrelevant when using external linking mode.
 
 The final program will be a dynamic executable, so that cmd/link can avoid
 needing to process arbitrary .o files. It only needs to process the .o

@@ -571,7 +571,7 @@ func generateTrace(params *traceParams, consumer traceConsumer) error {
 
 			fname := stk[0].Fn
 			info.name = fmt.Sprintf("G%v %s", newG, fname)
-			info.isSystemG = isSystemGoroutine(fname)
+			info.isSystemG = trace.IsSystemGoroutine(fname)
 
 			ctx.gcount++
 			setGState(ev, newG, gDead, gRunnable)
@@ -765,10 +765,8 @@ func generateTrace(params *traceParams, consumer traceConsumer) error {
 	// Display task and its regions if we are in task-oriented presentation mode.
 	if ctx.mode&modeTaskOriented != 0 {
 		// sort tasks based on the task start time.
-		sortedTask := make([]*taskDesc, 0, len(ctx.tasks))
-		for _, task := range ctx.tasks {
-			sortedTask = append(sortedTask, task)
-		}
+		sortedTask := make([]*taskDesc, len(ctx.tasks))
+		copy(sortedTask, ctx.tasks)
 		sort.SliceStable(sortedTask, func(i, j int) bool {
 			ti, tj := sortedTask[i], sortedTask[j]
 			if ti.firstTimestamp() == tj.firstTimestamp() {
@@ -1127,12 +1125,6 @@ func (ctx *traceContext) buildBranch(parent frameNode, stk []*trace.Frame) int {
 		ctx.consumer.consumeViewerFrame(strconv.Itoa(node.id), traceviewer.Frame{Name: fmt.Sprintf("%v:%v", frame.Fn, frame.Line), Parent: parent.id})
 	}
 	return ctx.buildBranch(node, stk)
-}
-
-func isSystemGoroutine(entryFn string) bool {
-	// This mimics runtime.isSystemGoroutine as closely as
-	// possible.
-	return entryFn != "runtime.main" && strings.HasPrefix(entryFn, "runtime.")
 }
 
 // firstTimestamp returns the timestamp of the first event record.

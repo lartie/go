@@ -725,7 +725,7 @@ type Config struct {
 
 	// mutex protects sessionTicketKeys and autoSessionTicketKeys.
 	mutex sync.RWMutex
-	// sessionTicketKeys contains zero or more ticket keys. If set, it means the
+	// sessionTicketKeys contains zero or more ticket keys. If set, it means
 	// the keys were set with SessionTicketKey or SetSessionTicketKeys. The
 	// first key is used for new tickets and any subsequent keys can be used to
 	// decrypt old tickets. The slice contents are not protected by the mutex
@@ -1338,7 +1338,7 @@ func (c *Config) writeKeyLog(label string, clientRandom, secret []byte) error {
 		return nil
 	}
 
-	logLine := []byte(fmt.Sprintf("%s %x %x\n", label, clientRandom, secret))
+	logLine := fmt.Appendf(nil, "%s %x %x\n", label, clientRandom, secret)
 
 	writerMutex.Lock()
 	_, err := c.KeyLogWriter.Write(logLine)

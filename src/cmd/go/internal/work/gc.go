@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"internal/platform"
 	"io"
 	"log"
 	"os"
@@ -22,7 +23,6 @@ import (
 	"cmd/go/internal/str"
 	"cmd/internal/objabi"
 	"cmd/internal/quoted"
-	"cmd/internal/sys"
 	"crypto/sha1"
 )
 
@@ -30,15 +30,17 @@ import (
 const trimPathGoRootFinal string = "$GOROOT"
 
 var runtimePackages = map[string]struct{}{
-	"internal/abi":            struct{}{},
-	"internal/bytealg":        struct{}{},
-	"internal/cpu":            struct{}{},
-	"internal/goarch":         struct{}{},
-	"internal/goos":           struct{}{},
-	"runtime":                 struct{}{},
-	"runtime/internal/atomic": struct{}{},
-	"runtime/internal/math":   struct{}{},
-	"runtime/internal/sys":    struct{}{},
+	"internal/abi":             struct{}{},
+	"internal/bytealg":         struct{}{},
+	"internal/coverage/rtcov":  struct{}{},
+	"internal/cpu":             struct{}{},
+	"internal/goarch":          struct{}{},
+	"internal/goos":            struct{}{},
+	"runtime":                  struct{}{},
+	"runtime/internal/atomic":  struct{}{},
+	"runtime/internal/math":    struct{}{},
+	"runtime/internal/sys":     struct{}{},
+	"runtime/internal/syscall": struct{}{},
 }
 
 // The Go toolchain.
@@ -138,6 +140,9 @@ func (gcToolchain) gc(b *Builder, a *Action, archive string, importcfg, embedcfg
 	}
 	if strings.HasPrefix(RuntimeVersion, "go1") && !strings.Contains(os.Args[0], "go_bootstrap") {
 		defaultGcFlags = append(defaultGcFlags, "-goversion", RuntimeVersion)
+	}
+	if p.Internal.CoverageCfg != "" {
+		defaultGcFlags = append(defaultGcFlags, "-coveragecfg="+p.Internal.CoverageCfg)
 	}
 	if symabis != "" {
 		defaultGcFlags = append(defaultGcFlags, "-symabis", symabis)
@@ -635,7 +640,7 @@ func (gcToolchain) ld(b *Builder, root *Action, out, importcfg, mainpkg string) 
 		// linker's build id, which will cause our build id to not
 		// match the next time the tool is built.
 		// Rely on the external build id instead.
-		if !sys.MustLinkExternal(cfg.Goos, cfg.Goarch) {
+		if !platform.MustLinkExternal(cfg.Goos, cfg.Goarch) {
 			ldflags = append(ldflags, "-X=cmd/internal/objabi.buildID="+root.buildID)
 		}
 	}

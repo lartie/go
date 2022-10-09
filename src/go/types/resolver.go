@@ -69,11 +69,11 @@ func (check *Checker) arityMatch(s, init *ast.ValueSpec) {
 			// init exprs from s
 			n := s.Values[l]
 			check.errorf(n, code, "extra init expr %s", n)
-			// TODO(gri) avoid declared but not used error here
+			// TODO(gri) avoid declared and not used error here
 		} else {
 			// init exprs "inherited"
 			check.errorf(s, code, "extra init expr at %s", check.fset.Position(init.Pos()))
-			// TODO(gri) avoid declared but not used error here
+			// TODO(gri) avoid declared and not used error here
 		}
 	case l > r && (init != nil || r != 1):
 		n := s.Names[r]
@@ -254,6 +254,9 @@ func (check *Checker) collectObjects() {
 			switch d := d.(type) {
 			case importDecl:
 				// import package
+				if d.spec.Path.Value == "" {
+					return // error reported by parser
+				}
 				path, err := validatedImportPath(d.spec.Path.Value)
 				if err != nil {
 					check.errorf(d.spec.Path, _BadImportPath, "invalid import path (%s)", err)
@@ -383,7 +386,7 @@ func (check *Checker) collectObjects() {
 				}
 			case typeDecl:
 				if d.spec.TypeParams.NumFields() != 0 && !check.allowVersion(pkg, 1, 18) {
-					check.softErrorf(d.spec.TypeParams.List[0], _UnsupportedFeature, "type parameters require go1.18 or later")
+					check.softErrorf(d.spec.TypeParams.List[0], _UnsupportedFeature, "type parameter requires go1.18 or later")
 				}
 				obj := NewTypeName(d.spec.Name.Pos(), pkg, d.spec.Name.Name, nil)
 				check.declarePkgObj(d.spec.Name, obj, &declInfo{file: fileScope, tdecl: d.spec})
@@ -394,7 +397,7 @@ func (check *Checker) collectObjects() {
 				if d.decl.Recv.NumFields() == 0 {
 					// regular function
 					if d.decl.Recv != nil {
-						check.error(d.decl.Recv, _BadRecv, "method is missing receiver")
+						check.error(d.decl.Recv, _BadRecv, "method has no receiver")
 						// treat as function
 					}
 					if name == "init" || (name == "main" && check.pkg.name == "main") {
@@ -408,7 +411,7 @@ func (check *Checker) collectObjects() {
 						}
 						if t := d.decl.Type; t.Params.NumFields() != 0 || t.Results != nil {
 							// TODO(rFindley) Should this be a hard error?
-							check.softErrorf(d.decl, code, "func %s must have no arguments and no return values", name)
+							check.softErrorf(d.decl.Name, code, "func %s must have no arguments and no return values", name)
 						}
 					}
 					if name == "init" {
@@ -441,7 +444,7 @@ func (check *Checker) collectObjects() {
 					check.recordDef(d.decl.Name, obj)
 				}
 				if d.decl.Type.TypeParams.NumFields() != 0 && !check.allowVersion(pkg, 1, 18) && !hasTParamError {
-					check.softErrorf(d.decl.Type.TypeParams.List[0], _UnsupportedFeature, "type parameters require go1.18 or later")
+					check.softErrorf(d.decl.Type.TypeParams.List[0], _UnsupportedFeature, "type parameter requires go1.18 or later")
 				}
 				info := &declInfo{file: fileScope, fdecl: d.decl}
 				// Methods are not package-level objects but we still track them in the
@@ -703,9 +706,9 @@ func (check *Checker) errorUnusedPkg(obj *PkgName) {
 		elem = elem[i+1:]
 	}
 	if obj.name == "" || obj.name == "." || obj.name == elem {
-		check.softErrorf(obj, _UnusedImport, "%q imported but not used", path)
+		check.softErrorf(obj, _UnusedImport, "%q imported and not used", path)
 	} else {
-		check.softErrorf(obj, _UnusedImport, "%q imported but not used as %s", path, obj.name)
+		check.softErrorf(obj, _UnusedImport, "%q imported as %s and not used", path, obj.name)
 	}
 }
 

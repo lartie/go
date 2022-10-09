@@ -160,17 +160,20 @@ func (b *Builder) toolID(name string) string {
 
 	cmdline := str.StringList(cfg.BuildToolexec, path, "-V=full")
 	cmd := exec.Command(cmdline[0], cmdline[1:]...)
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		base.Fatalf("%s: %v\n%s%s", desc, err, stdout.Bytes(), stderr.Bytes())
+		if stderr.Len() > 0 {
+			os.Stderr.WriteString(stderr.String())
+		}
+		base.Fatalf("go: error obtaining buildID for %s: %v", desc, err)
 	}
 
 	line := stdout.String()
 	f := strings.Fields(line)
 	if len(f) < 3 || f[0] != name && path != VetTool || f[1] != "version" || f[2] == "devel" && !strings.HasPrefix(f[len(f)-1], "buildID=") {
-		base.Fatalf("%s -V=full: unexpected output:\n\t%s", desc, line)
+		base.Fatalf("go: parsing buildID from %s -V=full: unexpected output:\n\t%s", desc, line)
 	}
 	if f[2] == "devel" {
 		// On the development branch, use the content ID part of the build ID.

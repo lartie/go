@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -55,6 +54,7 @@ var (
 
 	rebuildall   bool
 	defaultclang bool
+	noOpt        bool
 
 	vflag int // verbosity
 )
@@ -259,7 +259,7 @@ func xinit() {
 	os.Setenv("GOWORK", "off")
 
 	workdir = xworkdir()
-	if err := ioutil.WriteFile(pathf("%s/go.mod", workdir), []byte("module bootstrap"), 0666); err != nil {
+	if err := os.WriteFile(pathf("%s/go.mod", workdir), []byte("module bootstrap"), 0666); err != nil {
 		fatalf("cannot write stub go.mod: %s", err)
 	}
 	xatexit(rmworkdir)
@@ -832,7 +832,7 @@ func runInstall(pkg string, ch chan struct{}) {
 		var wg sync.WaitGroup
 		asmabis := append(asmArgs[:len(asmArgs):len(asmArgs)], "-gensymabis", "-o", symabis)
 		asmabis = append(asmabis, sfiles...)
-		if err := ioutil.WriteFile(goasmh, nil, 0666); err != nil {
+		if err := os.WriteFile(goasmh, nil, 0666); err != nil {
 			fatalf("cannot write empty go_asm.h: %s", err)
 		}
 		bgrun(&wg, dir, asmabis...)
@@ -852,7 +852,7 @@ func runInstall(pkg string, ch chan struct{}) {
 		fmt.Fprintf(buf, "packagefile %s=%s\n", dep, packagefile(dep))
 	}
 	importcfg := pathf("%s/importcfg", workdir)
-	if err := ioutil.WriteFile(importcfg, buf.Bytes(), 0666); err != nil {
+	if err := os.WriteFile(importcfg, buf.Bytes(), 0666); err != nil {
 		fatalf("cannot write importcfg file: %v", err)
 	}
 
@@ -938,7 +938,8 @@ func packagefile(pkg string) string {
 }
 
 // unixOS is the set of GOOS values matched by the "unix" build tag.
-// This is the same list as in go/build/syslist.go.
+// This is the same list as in go/build/syslist.go and
+// cmd/go/internal/imports/build.go.
 var unixOS = map[string]bool{
 	"aix":       true,
 	"android":   true,
@@ -1325,6 +1326,7 @@ func cmdbootstrap() {
 	}
 
 	gogcflags = os.Getenv("GO_GCFLAGS") // we were using $BOOT_GO_GCFLAGS until now
+	setNoOpt()
 	goldflags = os.Getenv("GO_LDFLAGS") // we were using $BOOT_GO_LDFLAGS until now
 	goBootstrap := pathf("%s/go_bootstrap", tooldir)
 	cmdGo := pathf("%s/go", gorootBin)
@@ -1357,7 +1359,7 @@ func cmdbootstrap() {
 	os.Setenv("CC", compilerEnvLookup(defaultcc, goos, goarch))
 	// Now that cmd/go is in charge of the build process, enable GOEXPERIMENT.
 	os.Setenv("GOEXPERIMENT", goexperiment)
-	goInstall(goBootstrap, append([]string{"-i"}, toolchain...)...)
+	goInstall(goBootstrap, toolchain...)
 	if debug {
 		run("", ShowOutput|CheckExit, pathf("%s/compile", tooldir), "-V=full")
 		run("", ShowOutput|CheckExit, pathf("%s/buildid", tooldir), pathf("%s/pkg/%s_%s/runtime/internal/sys.a", goroot, goos, goarch))
@@ -1385,13 +1387,12 @@ func cmdbootstrap() {
 		xprintf("\n")
 	}
 	xprintf("Building Go toolchain3 using go_bootstrap and Go toolchain2.\n")
-	goInstall(goBootstrap, append([]string{"-a", "-i"}, toolchain...)...)
+	goInstall(goBootstrap, append([]string{"-a"}, toolchain...)...)
 	if debug {
 		run("", ShowOutput|CheckExit, pathf("%s/compile", tooldir), "-V=full")
 		run("", ShowOutput|CheckExit, pathf("%s/buildid", tooldir), pathf("%s/pkg/%s_%s/runtime/internal/sys.a", goroot, goos, goarch))
 		copyfile(pathf("%s/compile3", tooldir), pathf("%s/compile", tooldir), writeExec)
 	}
-	checkNotStale(goBootstrap, append(toolchain, "runtime/internal/sys")...)
 
 	if goos == oldgoos && goarch == oldgoarch {
 		// Common case - not setting up for cross-compilation.
@@ -1425,11 +1426,8 @@ func cmdbootstrap() {
 		xprintf("Building packages and commands for target, %s/%s.\n", goos, goarch)
 	}
 	targets := []string{"std", "cmd"}
-	if goos == "js" && goarch == "wasm" {
-		// Skip the cmd tools for js/wasm. They're not usable.
-		targets = targets[:1]
-	}
 	goInstall(goBootstrap, targets...)
+	checkNotStale(goBootstrap, append(toolchain, "runtime/internal/sys")...)
 	checkNotStale(goBootstrap, targets...)
 	checkNotStale(cmdGo, targets...)
 	if debug {
@@ -1510,6 +1508,9 @@ func appendCompilerFlags(args []string) []string {
 
 func goCmd(goBinary string, cmd string, args ...string) {
 	goCmd := []string{goBinary, cmd}
+	if noOpt {
+		goCmd = append(goCmd, "-tags=noopt")
+	}
 	goCmd = appendCompilerFlags(goCmd)
 	if vflag > 0 {
 		goCmd = append(goCmd, "-v")
@@ -1525,6 +1526,9 @@ func goCmd(goBinary string, cmd string, args ...string) {
 
 func checkNotStale(goBinary string, targets ...string) {
 	goCmd := []string{goBinary, "list"}
+	if noOpt {
+		goCmd = append(goCmd, "-tags=noopt")
+	}
 	goCmd = appendCompilerFlags(goCmd)
 	goCmd = append(goCmd, "-f={{if .Stale}}\tSTALE {{.ImportPath}}: {{.StaleReason}}{{end}}")
 
@@ -1557,6 +1561,7 @@ var cgoEnabled = map[string]bool{
 	"freebsd/amd64":   true,
 	"freebsd/arm":     true,
 	"freebsd/arm64":   true,
+	"freebsd/riscv64": true,
 	"illumos/amd64":   true,
 	"linux/386":       true,
 	"linux/amd64":     true,
@@ -1799,4 +1804,13 @@ func IsRuntimePackagePath(pkgpath string) bool {
 		rval = strings.HasPrefix(pkgpath, "runtime/internal")
 	}
 	return rval
+}
+
+func setNoOpt() {
+	for _, gcflag := range strings.Split(gogcflags, " ") {
+		if gcflag == "-N" || gcflag == "-l" {
+			noOpt = true
+			break
+		}
+	}
 }

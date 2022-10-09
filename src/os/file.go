@@ -43,7 +43,6 @@ import (
 	"errors"
 	"internal/poll"
 	"internal/testlog"
-	"internal/unsafeheader"
 	"io"
 	"io/fs"
 	"runtime"
@@ -247,11 +246,7 @@ func (f *File) Seek(offset int64, whence int) (ret int64, err error) {
 // WriteString is like Write, but writes the contents of string s rather than
 // a slice of bytes.
 func (f *File) WriteString(s string) (n int, err error) {
-	var b []byte
-	hdr := (*unsafeheader.Slice)(unsafe.Pointer(&b))
-	hdr.Data = (*unsafeheader.String)(unsafe.Pointer(&s)).Data
-	hdr.Cap = len(s)
-	hdr.Len = len(s)
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
 	return f.Write(b)
 }
 
@@ -620,8 +615,10 @@ func isWindowsNulName(name string) bool {
 // operating system will begin with "/prefix": DirFS("/prefix").Open("file") is the
 // same as os.Open("/prefix/file"). So if /prefix/file is a symbolic link pointing outside
 // the /prefix tree, then using DirFS does not stop the access any more than using
-// os.Open does. DirFS is therefore not a general substitute for a chroot-style security
-// mechanism when the directory tree contains arbitrary content.
+// os.Open does. Additionally, the root of the fs.FS returned for a relative path,
+// DirFS("prefix"), will be affected by later calls to Chdir. DirFS is therefore not
+// a general substitute for a chroot-style security mechanism when the directory tree
+// contains arbitrary content.
 //
 // The result implements fs.StatFS.
 func DirFS(dir string) fs.FS {
@@ -645,8 +642,15 @@ func (dir dirFS) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) || runtime.GOOS == "windows" && containsAny(name, `\:`) {
 		return nil, &PathError{Op: "open", Path: name, Err: ErrInvalid}
 	}
-	f, err := Open(string(dir) + "/" + name)
+	f, err := Open(dir.join(name))
 	if err != nil {
+		if runtime.GOOS == "windows" {
+			// Undo the backslash conversion done by dir.join.
+			perr := err.(*PathError)
+			if containsAny(perr.Path, `\`) {
+				perr.Path = string(dir) + "/" + name
+			}
+		}
 		return nil, err // nil fs.File
 	}
 	return f, nil
@@ -656,11 +660,26 @@ func (dir dirFS) Stat(name string) (fs.FileInfo, error) {
 	if !fs.ValidPath(name) || runtime.GOOS == "windows" && containsAny(name, `\:`) {
 		return nil, &PathError{Op: "stat", Path: name, Err: ErrInvalid}
 	}
-	f, err := Stat(string(dir) + "/" + name)
+	f, err := Stat(dir.join(name))
 	if err != nil {
 		return nil, err
 	}
 	return f, nil
+}
+
+// join returns the path for name in dir. We can't always use "/"
+// because that fails on Windows for UNC paths.
+func (dir dirFS) join(name string) string {
+	if runtime.GOOS == "windows" && containsAny(name, "/") {
+		buf := []byte(name)
+		for i, b := range buf {
+			if b == '/' {
+				buf[i] = '\\'
+			}
+		}
+		name = string(buf)
+	}
+	return string(dir) + string(PathSeparator) + name
 }
 
 // ReadFile reads the named file and returns the contents.

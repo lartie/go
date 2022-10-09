@@ -364,19 +364,14 @@ func (check *Checker) missingMethod(V Type, T *Interface, static bool) (method, 
 	return
 }
 
-// missingMethodReason returns a string giving the detailed reason for a missing method m,
-// where m is missing from V, but required by T. It puts the reason in parentheses,
+// missingMethodCause returns a string giving the detailed cause for a missing method m,
+// where m is missing from V, but required by T. It puts the cause in parentheses,
 // and may include more have/want info after that. If non-nil, alt is a relevant
 // method that matches in some way. It may have the correct name, but wrong type, or
 // it may have a pointer receiver, or it may have the correct name except wrong case.
 // check may be nil.
-func (check *Checker) missingMethodReason(V, T Type, m, alt *Func) string {
-	var mname string
-	if check != nil && check.conf.CompilerErrorMessages {
-		mname = m.Name() + " method"
-	} else {
-		mname = "method " + m.Name()
-	}
+func (check *Checker) missingMethodCause(V, T Type, m, alt *Func) string {
+	mname := "method " + m.Name()
 
 	if alt != nil {
 		if m.Name() != alt.Name() {
@@ -425,7 +420,9 @@ func (check *Checker) funcString(f *Func) string {
 	if check != nil {
 		qf = check.qualifier
 	}
-	WriteSignature(buf, f.typ.(*Signature), qf)
+	w := newTypeWriter(buf, qf)
+	w.paramNames = false
+	w.signature(f.typ.(*Signature))
 	return buf.String()
 }
 
@@ -449,14 +446,14 @@ func (check *Checker) assertableTo(V *Interface, T Type) (method, wrongType *Fun
 // newAssertableTo reports whether a value of type V can be asserted to have type T.
 // It also implements behavior for interfaces that currently are only permitted
 // in constraint position (we have not yet defined that behavior in the spec).
-func (check *Checker) newAssertableTo(V *Interface, T Type) error {
+func (check *Checker) newAssertableTo(V *Interface, T Type) bool {
 	// no static check is required if T is an interface
 	// spec: "If T is an interface type, x.(T) asserts that the
 	//        dynamic type of x implements the interface T."
 	if IsInterface(T) {
-		return nil
+		return true
 	}
-	return check.implements(T, V)
+	return check.implements(T, V, nil)
 }
 
 // deref dereferences typ if it is a *Pointer and returns its base and true.

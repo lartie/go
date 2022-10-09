@@ -5,7 +5,6 @@
 package os_test
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -315,12 +314,8 @@ func TestReadClosed(t *testing.T) {
 	_, err = file.Read(b)
 
 	e, ok := err.(*PathError)
-	if !ok {
-		t.Fatalf("Read: %T(%v), want PathError", e, e)
-	}
-
-	if e.Err != ErrClosed {
-		t.Errorf("Read: %v, want PathError(ErrClosed)", e)
+	if !ok || e.Err != ErrClosed {
+		t.Fatalf("Read: got %T(%v), want %T(%v)", err, err, e, ErrClosed)
 	}
 }
 
@@ -1167,7 +1162,7 @@ func exec(t *testing.T, dir, cmd string, args []string, expect string) {
 	}
 	w.Close()
 
-	var b bytes.Buffer
+	var b strings.Builder
 	io.Copy(&b, r)
 	output := b.String()
 
@@ -1718,7 +1713,7 @@ func runBinHostname(t *testing.T) string {
 	}
 	w.Close()
 
-	var b bytes.Buffer
+	var b strings.Builder
 	io.Copy(&b, r)
 	_, err = p.Wait()
 	if err != nil {
@@ -2544,9 +2539,9 @@ func testDoubleCloseError(t *testing.T, path string) {
 	if err := file.Close(); err == nil {
 		t.Error("second Close did not fail")
 	} else if pe, ok := err.(*PathError); !ok {
-		t.Errorf("second Close returned unexpected error type %T; expected fs.PathError", pe)
+		t.Errorf("second Close: got %T, want %T", err, pe)
 	} else if pe.Err != ErrClosed {
-		t.Errorf("second Close returned %q, wanted %q", err, ErrClosed)
+		t.Errorf("second Close: got %q, want %q", pe.Err, ErrClosed)
 	} else {
 		t.Logf("second close returned expected error %q", err)
 	}
@@ -2717,13 +2712,25 @@ func TestDirFS(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := fstest.TestFS(DirFS("./testdata/dirfs"), "a", "b", "dir/x"); err != nil {
+	fs := DirFS("./testdata/dirfs")
+	if err := fstest.TestFS(fs, "a", "b", "dir/x"); err != nil {
 		t.Fatal(err)
+	}
+
+	// Test that the error message does not contain a backslash.
+	const nonesuch = "dir/nonesuch"
+	_, err := fs.Open(nonesuch)
+	if err == nil {
+		t.Error("fs.Open of nonexistent file succeeded")
+	} else {
+		if !strings.Contains(err.Error(), nonesuch) {
+			t.Errorf("error %q does not contain %q", err, nonesuch)
+		}
 	}
 
 	// Test that Open does not accept backslash as separator.
 	d := DirFS(".")
-	_, err := d.Open(`testdata\dirfs`)
+	_, err = d.Open(`testdata\dirfs`)
 	if err == nil {
 		t.Fatalf(`Open testdata\dirfs succeeded`)
 	}
@@ -2790,5 +2797,117 @@ func TestWriteStringAlloc(t *testing.T) {
 	})
 	if allocs != 0 {
 		t.Errorf("expected 0 allocs for File.WriteString, got %v", allocs)
+	}
+}
+
+// Test that it's OK to have parallel I/O and Close on a pipe.
+func TestPipeIOCloseRace(t *testing.T) {
+	// Skip on wasm, which doesn't have pipes.
+	if runtime.GOOS == "js" {
+		t.Skip("skipping on js: no pipes")
+	}
+
+	r, w, err := Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		for {
+			n, err := w.Write([]byte("hi"))
+			if err != nil {
+				// We look at error strings as the
+				// expected errors are OS-specific.
+				switch {
+				case errors.Is(err, ErrClosed),
+					strings.Contains(err.Error(), "broken pipe"),
+					strings.Contains(err.Error(), "pipe is being closed"),
+					strings.Contains(err.Error(), "hungup channel"):
+					// Ignore an expected error.
+				default:
+					// Unexpected error.
+					t.Error(err)
+				}
+				return
+			}
+			if n != 2 {
+				t.Errorf("wrote %d bytes, expected 2", n)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for {
+			var buf [2]byte
+			n, err := r.Read(buf[:])
+			if err != nil {
+				if err != io.EOF && !errors.Is(err, ErrClosed) {
+					t.Error(err)
+				}
+				return
+			}
+			if n != 2 {
+				t.Errorf("read %d bytes, want 2", n)
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		// Let the other goroutines start. This is just to get
+		// a better test, the test will still pass if they
+		// don't start.
+		time.Sleep(time.Millisecond)
+
+		if err := r.Close(); err != nil {
+			t.Error(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	wg.Wait()
+}
+
+// Test that it's OK to call Close concurrently on a pipe.
+func TestPipeCloseRace(t *testing.T) {
+	// Skip on wasm, which doesn't have pipes.
+	if runtime.GOOS == "js" {
+		t.Skip("skipping on js: no pipes")
+	}
+
+	r, w, err := Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	c := make(chan error, 4)
+	f := func() {
+		defer wg.Done()
+		c <- r.Close()
+		c <- w.Close()
+	}
+	wg.Add(2)
+	go f()
+	go f()
+	nils, errs := 0, 0
+	for i := 0; i < 4; i++ {
+		err := <-c
+		if err == nil {
+			nils++
+		} else {
+			errs++
+		}
+	}
+	if nils != 2 || errs != 2 {
+		t.Errorf("got nils %d errs %d, want 2 2", nils, errs)
 	}
 }

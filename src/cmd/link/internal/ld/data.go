@@ -222,7 +222,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 				if ldr.SymName(rs) == "main.main" || (!target.IsPlugin() && ldr.SymName(rs) == "main..inittask") {
 					sb := ldr.MakeSymbolUpdater(rs)
 					sb.SetType(sym.SDYNIMPORT)
-				} else if strings.HasPrefix(ldr.SymName(rs), "go.info.") {
+				} else if strings.HasPrefix(ldr.SymName(rs), "go:info.") {
 					// Skip go.info symbols. They are only needed to communicate
 					// DWARF info between the compiler and linker.
 					continue
@@ -1074,6 +1074,8 @@ func dwarfblk(ctxt *Link, out *OutBuf, addr int64, size int64) {
 	writeBlocks(ctxt, out, ctxt.outSem, ctxt.loader, syms, addr, size, zeros[:])
 }
 
+var covCounterDataStartOff, covCounterDataLen uint64
+
 var zeros [512]byte
 
 var (
@@ -1108,7 +1110,7 @@ func addstrdata(arch *sys.Arch, l *loader.Loader, name, value string) {
 	}
 	if goType := l.SymGoType(s); goType == 0 {
 		return
-	} else if typeName := l.SymName(goType); typeName != "type.string" {
+	} else if typeName := l.SymName(goType); typeName != "type:string" {
 		Errorf(nil, "%s: cannot set with -X: not a var of type string (%s)", name, typeName)
 		return
 	}
@@ -1781,6 +1783,15 @@ func (state *dodataState) allocateDataSections(ctxt *Link) {
 	ldr.SetSymSect(ldr.LookupOrCreateSym("runtime.enoptrbss", 0), sect)
 	ldr.SetSymSect(ldr.LookupOrCreateSym("runtime.end", 0), sect)
 
+	// Code coverage counters are assigned to the .noptrbss section.
+	// We assign them in a separate pass so that they stay aggregated
+	// together in a single blob (coverage runtime depends on this).
+	covCounterDataStartOff = sect.Length
+	state.assignToSection(sect, sym.SCOVERAGE_COUNTER, sym.SNOPTRBSS)
+	covCounterDataLen = sect.Length - covCounterDataStartOff
+	ldr.SetSymSect(ldr.LookupOrCreateSym("runtime.covctrs", 0), sect)
+	ldr.SetSymSect(ldr.LookupOrCreateSym("runtime.ecovctrs", 0), sect)
+
 	// Coverage instrumentation counters for libfuzzer.
 	if len(state.data[sym.SLIBFUZZER_8BIT_COUNTER]) > 0 {
 		sect := state.allocateNamedSectionAndAssignSyms(&Segdata, "__sancov_cntrs", sym.SLIBFUZZER_8BIT_COUNTER, sym.Sxxx, 06)
@@ -1854,6 +1865,9 @@ func (state *dodataState) allocateDataSections(ctxt *Link) {
 	}
 	for _, symn := range sym.ReadOnly {
 		symnStartValue := state.datsize
+		if len(state.data[symn]) != 0 {
+			symnStartValue = aligndatsize(state, symnStartValue, state.data[symn][0])
+		}
 		state.assignToSection(sect, symn, sym.SRODATA)
 		setCarrierSize(symn, state.datsize-symnStartValue)
 		if ctxt.HeadType == objabi.Haix {
@@ -1935,6 +1949,9 @@ func (state *dodataState) allocateDataSections(ctxt *Link) {
 
 			symn := sym.RelROMap[symnro]
 			symnStartValue := state.datsize
+			if len(state.data[symn]) != 0 {
+				symnStartValue = aligndatsize(state, symnStartValue, state.data[symn][0])
+			}
 
 			for _, s := range state.data[symn] {
 				outer := ldr.OuterSym(s)
@@ -2146,7 +2163,7 @@ func (ctxt *Link) textbuildid() {
 	}
 
 	ldr := ctxt.loader
-	s := ldr.CreateSymForUpdate("go.buildid", 0)
+	s := ldr.CreateSymForUpdate("go:buildid", 0)
 	// The \xff is invalid UTF-8, meant to make it less likely
 	// to find one of these accidentally.
 	data := "\xff Go build ID: " + strconv.Quote(*flagBuildid) + "\n \xff"
@@ -2621,7 +2638,7 @@ func (ctxt *Link) address() []*sym.Segment {
 	}
 
 	if ctxt.BuildMode == BuildModeShared {
-		s := ldr.LookupOrCreateSym("go.link.abihashbytes", 0)
+		s := ldr.LookupOrCreateSym("go:link.abihashbytes", 0)
 		sect := ldr.SymSect(ldr.LookupOrCreateSym(".note.go.abihash", 0))
 		ldr.SetSymSect(s, sect)
 		ldr.SetSymValue(s, int64(sect.Vaddr+16))
@@ -2676,6 +2693,8 @@ func (ctxt *Link) address() []*sym.Segment {
 	ctxt.xdefine("runtime.edata", sym.SDATA, int64(data.Vaddr+data.Length))
 	ctxt.xdefine("runtime.noptrbss", sym.SNOPTRBSS, int64(noptrbss.Vaddr))
 	ctxt.xdefine("runtime.enoptrbss", sym.SNOPTRBSS, int64(noptrbss.Vaddr+noptrbss.Length))
+	ctxt.xdefine("runtime.covctrs", sym.SCOVERAGE_COUNTER, int64(noptrbss.Vaddr+covCounterDataStartOff))
+	ctxt.xdefine("runtime.ecovctrs", sym.SCOVERAGE_COUNTER, int64(noptrbss.Vaddr+covCounterDataStartOff+covCounterDataLen))
 	ctxt.xdefine("runtime.end", sym.SBSS, int64(Segdata.Vaddr+Segdata.Length))
 
 	if fuzzCounters != nil {

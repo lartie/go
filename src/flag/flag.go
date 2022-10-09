@@ -49,10 +49,11 @@ The arguments are indexed from 0 through flag.NArg()-1.
 The following forms are permitted:
 
 	-flag
+	--flag   // double dashes are also permitted
 	-flag=x
 	-flag x  // non-boolean flags only
 
-One or two minus signs may be used; they are equivalent.
+One or two dashes may be used; they are equivalent.
 The last form is not permitted for boolean flags because the
 meaning of the command
 
@@ -549,9 +550,11 @@ func UnquoteUsage(flag *Flag) (name string, usage string) {
 	}
 	// No explicit name, so use type if we can find one.
 	name = "value"
-	switch flag.Value.(type) {
+	switch fv := flag.Value.(type) {
 	case boolFlag:
-		name = ""
+		if fv.IsBoolFlag() {
+			name = ""
+		}
 	case *durationValue:
 		name = "duration"
 	case *float64Value:

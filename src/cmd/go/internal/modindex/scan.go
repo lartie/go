@@ -4,6 +4,7 @@ import (
 	"cmd/go/internal/base"
 	"cmd/go/internal/fsys"
 	"cmd/go/internal/par"
+	"cmd/go/internal/str"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,35 +16,66 @@ import (
 	"strings"
 )
 
+// moduleWalkErr returns filepath.SkipDir if the directory isn't relevant
+// when indexing a module or generating a filehash, ErrNotIndexed,
+// if the module shouldn't be indexed, and nil otherwise.
+func moduleWalkErr(modroot string, path string, info fs.FileInfo, err error) error {
+	if err != nil {
+		return ErrNotIndexed
+	}
+	// stop at module boundaries
+	if info.IsDir() && path != modroot {
+		if fi, err := fsys.Stat(filepath.Join(path, "go.mod")); err == nil && !fi.IsDir() {
+			return filepath.SkipDir
+		}
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		if target, err := fsys.Stat(path); err == nil && target.IsDir() {
+			// return an error to make the module hash invalid.
+			// Symlink directories in modules are tricky, so we won't index
+			// modules that contain them.
+			// TODO(matloob): perhaps don't return this error if the symlink leads to
+			// a directory with a go.mod file.
+			return ErrNotIndexed
+		}
+	}
+	return nil
+}
+
 // indexModule indexes the module at the given directory and returns its
-// encoded representation.
+// encoded representation. It returns ErrNotIndexed if the module can't
+// be indexed because it contains symlinks.
 func indexModule(modroot string) ([]byte, error) {
+	fsys.Trace("indexModule", modroot)
 	var packages []*rawPackage
 	err := fsys.Walk(modroot, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
+		if err := moduleWalkErr(modroot, path, info, err); err != nil {
 			return err
 		}
+
 		if !info.IsDir() {
 			return nil
 		}
-		// stop at module boundaries
-		if modroot != path {
-			if fi, err := fsys.Stat(filepath.Join(path, "go.mod")); err == nil && !fi.IsDir() {
-				return filepath.SkipDir
-			}
+		if !str.HasFilePathPrefix(path, modroot) {
+			panic(fmt.Errorf("path %v in walk doesn't have modroot %v as prefix", path, modroot))
 		}
-		// TODO(matloob): what do we do about symlinks
-		rel, err := filepath.Rel(modroot, path)
-		if err != nil {
-			panic(err)
-		}
+		rel := str.TrimFilePathPrefix(path, modroot)
 		packages = append(packages, importRaw(modroot, rel))
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return encodeModule(packages)
+	return encodeModuleBytes(packages), nil
+}
+
+// indexPackage indexes the package at the given directory and returns its
+// encoded representation. It returns ErrNotIndexed if the package can't
+// be indexed.
+func indexPackage(modroot, pkgdir string) []byte {
+	fsys.Trace("indexPackage", pkgdir)
+	p := importRaw(modroot, relPath(pkgdir, modroot))
+	return encodePackageBytes(p)
 }
 
 // rawPackage holds the information from each package that's needed to
@@ -83,7 +115,7 @@ func parseErrorToString(err error) string {
 	return string(s)
 }
 
-// parseErrorFrom string converts a string produced by parseErrorToString back
+// parseErrorFromString converts a string produced by parseErrorToString back
 // to an error.  An empty string is converted to a nil error, and all
 // other strings are expected to be JSON-marshalled parseError structs.
 // The two functions are meant to preserve the structure of an
@@ -178,7 +210,10 @@ func importRaw(modroot, reldir string) *rawPackage {
 			continue
 		}
 		info, err := getFileInfo(absdir, name, fset)
-		if err != nil {
+		if err == errNonSource {
+			// not a source or object file. completely ignore in the index
+			continue
+		} else if err != nil {
 			p.sourceFiles = append(p.sourceFiles, &rawFile{name: name, error: err.Error()})
 			continue
 		} else if info == nil {

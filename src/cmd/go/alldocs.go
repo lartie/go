@@ -97,9 +97,6 @@
 // ends with a slash or backslash, then any resulting executables
 // will be written to that directory.
 //
-// The -i flag installs the packages that are dependencies of the target.
-// The -i flag is deprecated. Compiled packages are cached automatically.
-//
 // The build flags are shared by the build, clean, get, install, list, run,
 // and test commands:
 //
@@ -125,6 +122,15 @@
 //		Supported only on linux/arm64, linux/amd64.
 //		Supported only on linux/amd64 or linux/arm64 and only with GCC 7 and higher
 //		or Clang/LLVM 9 and higher.
+//	-cover
+//		enable code coverage instrumentation (requires
+//		that GOEXPERIMENT=coverageredesign be set).
+//	-coverpkg pattern1,pattern2,pattern3
+//		For a build that targets package 'main' (e.g. building a Go
+//		executable), apply coverage analysis to each package matching
+//		the patterns. The default is to apply coverage analysis to
+//		packages in the main Go module. See 'go help packages' for a
+//		description of package patterns.  Sets -cover.
 //	-v
 //		print the names of packages as they are compiled.
 //	-work
@@ -195,11 +201,10 @@
 //		For example, when building with a non-standard configuration,
 //		use -pkgdir to keep generated packages in a separate location.
 //	-tags tag,list
-//		a comma-separated list of build tags to consider satisfied during the
-//		build. For more information about build tags, see the description of
-//		build constraints in the documentation for the go/build package.
-//		(Earlier versions of Go used a space-separated list, and that form
-//		is deprecated but still recognized.)
+//		a comma-separated list of additional build tags to consider satisfied
+//		during the build. For more information about build tags, see
+//		'go help buildconstraint'. (Earlier versions of Go used a
+//		space-separated list, and that form is deprecated but still recognized.)
 //	-trimpath
 //		remove all file system paths from the resulting executable.
 //		Instead of absolute file system paths, the recorded file names
@@ -595,13 +600,20 @@
 //
 // The generator is run in the package's source directory.
 //
-// Go generate accepts one specific flag:
+// Go generate accepts two specific flags:
 //
 //	-run=""
 //		if non-empty, specifies a regular expression to select
 //		directives whose full original source text (excluding
 //		any trailing spaces and final newline) matches the
 //		expression.
+//
+//	-skip=""
+//		if non-empty, specifies a regular expression to suppress
+//		directives whose full original source text (excluding
+//		any trailing spaces and final newline) matches the
+//		expression. If a directive matches both the -run and
+//		the -skip arguments, it is skipped.
 //
 // It also accepts the standard build flags including -v, -n, and -x.
 // The -v flag prints the names of packages and files as they are
@@ -728,9 +740,6 @@
 // When module-aware mode is disabled, other packages are installed in the
 // directory $GOPATH/pkg/$GOOS_$GOARCH. When module-aware mode is enabled,
 // other packages are built and cached but not installed.
-//
-// The -i flag installs the dependencies of the named packages as well.
-// The -i flag is deprecated. Compiled packages are cached automatically.
 //
 // For more about the build flags, see 'go help build'.
 // For more about specifying packages, see 'go help packages'.
@@ -930,19 +939,23 @@
 // applied to a Go struct, but now a Module struct:
 //
 //	type Module struct {
-//	    Path      string       // module path
-//	    Version   string       // module version
-//	    Versions  []string     // available module versions (with -versions)
-//	    Replace   *Module      // replaced by this module
-//	    Time      *time.Time   // time version was created
-//	    Update    *Module      // available update, if any (with -u)
-//	    Main      bool         // is this the main module?
-//	    Indirect  bool         // is this module only an indirect dependency of main module?
-//	    Dir       string       // directory holding files for this module, if any
-//	    GoMod     string       // path to go.mod file used when loading this module, if any
-//	    GoVersion string       // go version used in module
-//	    Retracted string       // retraction information, if any (with -retracted or -u)
-//	    Error     *ModuleError // error loading module
+//	    Path       string        // module path
+//	    Query      string        // version query corresponding to this version
+//	    Version    string        // module version
+//	    Versions   []string      // available module versions
+//	    Replace    *Module       // replaced by this module
+//	    Time       *time.Time    // time version was created
+//	    Update     *Module       // available update (with -u)
+//	    Main       bool          // is this the main module?
+//	    Indirect   bool          // module is only indirectly needed by main module
+//	    Dir        string        // directory holding local copy of files, if any
+//	    GoMod      string        // path to go.mod file describing module, if any
+//	    GoVersion  string        // go version used in module
+//	    Retracted  []string      // retraction information, if any (with -retracted or -u)
+//	    Deprecated string        // deprecation message, if any (with -u)
+//	    Error      *ModuleError  // error loading module
+//	    Origin     any           // provenance of module
+//	    Reuse      bool          // reuse of old module info is safe
 //	}
 //
 //	type ModuleError struct {
@@ -1019,6 +1032,16 @@
 // module as a Module struct. If an error occurs, the result will
 // be a Module struct with a non-nil Error field.
 //
+// When using -m, the -reuse=old.json flag accepts the name of file containing
+// the JSON output of a previous 'go list -m -json' invocation with the
+// same set of modifier flags (such as -u, -retracted, and -versions).
+// The go command may use this file to determine that a module is unchanged
+// since the previous invocation and avoid redownloading information about it.
+// Modules that are not redownloaded will be marked in the new output by
+// setting the Reuse field to true. Normally the module cache provides this
+// kind of reuse automatically; the -reuse flag can be useful on systems that
+// do not preserve the module cache.
+//
 // For more about build flags, see 'go help build'.
 //
 // For more about specifying packages, see 'go help packages'.
@@ -1055,7 +1078,7 @@
 //
 // Usage:
 //
-//	go mod download [-x] [-json] [modules]
+//	go mod download [-x] [-json] [-reuse=old.json] [modules]
 //
 // Download downloads the named modules, which can be module patterns selecting
 // dependencies of the main module or module queries of the form path@version.
@@ -1078,6 +1101,7 @@
 //
 //	type Module struct {
 //	    Path     string // module path
+//	    Query    string // version query corresponding to this version
 //	    Version  string // module version
 //	    Error    string // error loading module
 //	    Info     string // absolute path to cached .info file
@@ -1086,7 +1110,17 @@
 //	    Dir      string // absolute path to cached source root directory
 //	    Sum      string // checksum for path, version (as in go.sum)
 //	    GoModSum string // checksum for go.mod (as in go.sum)
+//	    Origin   any    // provenance of module
+//	    Reuse    bool   // reuse of old module info is safe
 //	}
+//
+// The -reuse flag accepts the name of file containing the JSON output of a
+// previous 'go mod download -json' invocation. The go command may use this
+// file to determine that a module is unchanged since the previous invocation
+// and avoid redownloading it. Modules that are not redownloaded will be marked
+// in the new output by setting the Reuse field to true. Normally the module
+// cache provides this kind of reuse automatically; the -reuse flag can be
+// useful on systems that do not preserve the module cache.
 //
 // The -x flag causes download to print the commands download executes.
 //
@@ -1684,7 +1718,7 @@
 // the package's source root (usually $GOPATH) or that consult environment
 // variables only match future runs in which the files and environment
 // variables are unchanged. A cached test result is treated as executing
-// in no time at all,so a successful package test result will be cached and
+// in no time at all, so a successful package test result will be cached and
 // reused regardless of -timeout setting.
 //
 // In addition to the build flags, the flags handled by 'go test' itself are:
@@ -1703,11 +1737,6 @@
 //	-exec xprog
 //	    Run the test binary using xprog. The behavior is the same as
 //	    in 'go run'. See 'go help run' for details.
-//
-//	-i
-//	    Install packages that are dependencies of the test.
-//	    Do not run the test.
-//	    The -i flag is deprecated. Compiled packages are cached automatically.
 //
 //	-json
 //	    Convert test output to JSON suitable for automated processing.
@@ -1785,7 +1814,7 @@
 // or additional checks.
 // For example, the 'shadow' analyzer can be built and run using these commands:
 //
-//	go install golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow
+//	go install golang.org/x/tools/go/analysis/passes/shadow/cmd/shadow@latest
 //	go vet -vettool=$(which shadow)
 //
 // The build flags supported by go vet are those that control package resolution
@@ -1796,11 +1825,12 @@
 //
 // # Build constraints
 //
-// A build constraint, also known as a build tag, is a line comment that begins
+// A build constraint, also known as a build tag, is a condition under which a
+// file should be included in the package. Build constraints are given by a
+// line comment that begins
 //
 //	//go:build
 //
-// that lists the conditions under which a file should be included in the package.
 // Constraints may appear in any kind of source file (not just Go), but
 // they must appear near the top of the file, preceded
 // only by blank lines and other line comments. These rules mean that in Go
@@ -1809,9 +1839,9 @@
 // To distinguish build constraints from package documentation,
 // a build constraint should be followed by a blank line.
 //
-// A build constraint is evaluated as an expression containing options
-// combined by ||, &&, and ! operators and parentheses. Operators have
-// the same meaning as in Go.
+// A build constraint comment is evaluated as an expression containing
+// build tags combined by ||, &&, and ! operators and parentheses.
+// Operators have the same meaning as in Go.
 //
 // For example, the following build constraint constrains a file to
 // build when the "linux" and "386" constraints are satisfied, or when
@@ -1821,7 +1851,7 @@
 //
 // It is an error for a file to have more than one //go:build line.
 //
-// During a particular build, the following words are satisfied:
+// During a particular build, the following build tags are satisfied:
 //
 //   - the target operating system, as spelled by runtime.GOOS, set with the
 //     GOOS environment variable.
@@ -2139,10 +2169,17 @@
 //		Valid values are hardfloat (default), softfloat.
 //	GOPPC64
 //		For GOARCH=ppc64{,le}, the target ISA (Instruction Set Architecture).
-//		Valid values are power8 (default), power9.
+//		Valid values are power8 (default), power9, power10.
 //	GOWASM
 //		For GOARCH=wasm, comma-separated list of experimental WebAssembly features to use.
 //		Valid values are satconv, signext.
+//
+// Environment variables for use with code coverage:
+//
+//	GOCOVERDIR
+//		Directory into which to write code coverage data files
+//		generated by running a "go build -cover" binary.
+//		Requires that GOEXPERIMENT=coverageredesign is enabled.
 //
 // Special-purpose environment variables:
 //
@@ -2951,6 +2988,7 @@
 //	    run too, so that -run=X/Y matches and runs and reports the result
 //	    of all tests matching X, even those without sub-tests matching Y,
 //	    because it must run them to look for those sub-tests.
+//	    See also -skip.
 //
 //	-short
 //	    Tell long-running tests to shorten their run time.
@@ -2964,6 +3002,14 @@
 //	    the randomizer using the system clock. If -shuffle is set to an
 //	    integer N, then N will be used as the seed value. In both cases,
 //	    the seed will be reported for reproducibility.
+//
+//	-skip regexp
+//	    Run only those tests, examples, fuzz tests, and benchmarks that
+//	    do not match the regular expression. Like for -run and -bench,
+//	    for tests and benchmarks, the regular expression is split by unbracketed
+//	    slash (/) characters into a sequence of regular expressions, and each
+//	    part of a test's identifier must match the corresponding element in
+//	    the sequence, if any.
 //
 //	-timeout d
 //	    If a test binary runs longer than duration d, panic.

@@ -45,11 +45,11 @@ type Context struct {
 	Dir string
 
 	CgoEnabled  bool   // whether cgo files are included
-	UseAllFiles bool   // use files regardless of +build lines, file names
+	UseAllFiles bool   // use files regardless of go:build lines, file names
 	Compiler    string // compiler to assume when computing target paths
 
 	// The build, tool, and release tags specify build constraints
-	// that should be considered satisfied when processing +build lines.
+	// that should be considered satisfied when processing go:build lines.
 	// Clients creating a new context may customize BuildTags, which
 	// defaults to empty, but it is usually an error to customize ToolTags or ReleaseTags.
 	// ToolTags defaults to build tags appropriate to the current Go toolchain configuration.
@@ -179,10 +179,11 @@ func hasSubdir(root, dir string) (rel string, ok bool) {
 		root += sep
 	}
 	dir = filepath.Clean(dir)
-	if !strings.HasPrefix(dir, root) {
+	after, found := strings.CutPrefix(dir, root)
+	if !found {
 		return "", false
 	}
-	return filepath.ToSlash(dir[len(root):]), true
+	return filepath.ToSlash(after), true
 }
 
 // readDir calls ctxt.ReadDir (if not nil) or else os.ReadDir.
@@ -314,23 +315,16 @@ func defaultContext() Context {
 	}
 	c.GOPATH = envOr("GOPATH", defaultGOPATH())
 	c.Compiler = runtime.Compiler
+	c.ToolTags = append(c.ToolTags, buildcfg.ToolTags...)
 
-	// For each experiment that has been enabled in the toolchain, define a
-	// build tag with the same name but prefixed by "goexperiment." which can be
-	// used for compiling alternative files for the experiment. This allows
-	// changes for the experiment, like extra struct fields in the runtime,
-	// without affecting the base non-experiment code at all.
-	for _, exp := range buildcfg.Experiment.Enabled() {
-		c.ToolTags = append(c.ToolTags, "goexperiment."+exp)
-	}
 	defaultToolTags = append([]string{}, c.ToolTags...) // our own private copy
 
 	// Each major Go release in the Go 1.x series adds a new
 	// "go1.x" release tag. That is, the go1.x tag is present in
 	// all releases >= Go 1.x. Code that requires Go 1.x or later
-	// should say "+build go1.x", and code that should only be
+	// should say "go:build go1.x", and code that should only be
 	// built before Go 1.x (perhaps it is the stub to use in that
-	// case) should say "+build !go1.x".
+	// case) should say "go:build !go1.x".
 	// The last element in ReleaseTags is the current release.
 	for i := 1; i <= goversion.Version; i++ {
 		c.ReleaseTags = append(c.ReleaseTags, "go1."+strconv.Itoa(i))
@@ -715,6 +709,9 @@ func (ctxt *Context) Import(path string, srcDir string, mode ImportMode) (*Packa
 				tried.goroot = dir
 			}
 			if ctxt.Compiler == "gccgo" && goroot.IsStandardPackage(ctxt.GOROOT, ctxt.Compiler, path) {
+				// TODO(bcmills): Setting p.Dir here is misleading, because gccgo
+				// doesn't actually load its standard-library packages from this
+				// directory. See if we can leave it unset.
 				p.Dir = ctxt.joinPath(ctxt.GOROOT, "src", path)
 				p.Goroot = true
 				p.Root = ctxt.GOROOT
@@ -1401,7 +1398,7 @@ type fileEmbed struct {
 // If name denotes a Go program, matchFile reads until the end of the
 // imports and returns that section of the file in the fileInfo's header field,
 // even though it only considers text until the first non-comment
-// for +build lines.
+// for go:build lines.
 //
 // If allTags is non-nil, matchFile records any encountered build tag
 // by setting allTags[tag] = true.
@@ -1451,7 +1448,7 @@ func (ctxt *Context) matchFile(dir, name string, allTags map[string]bool, binary
 		return nil, fmt.Errorf("read %s: %v", info.name, err)
 	}
 
-	// Look for +build comments to accept or reject the file.
+	// Look for go:build comments to accept or reject the file.
 	ok, sawBinaryOnly, err := ctxt.shouldBuild(info.header, allTags)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %v", name, err)
@@ -1487,15 +1484,11 @@ func ImportDir(dir string, mode ImportMode) (*Package, error) {
 }
 
 var (
-	bSlashSlash = []byte(slashSlash)
-	bStarSlash  = []byte(starSlash)
-	bSlashStar  = []byte(slashStar)
-	bPlusBuild  = []byte("+build")
+	plusBuild = []byte("+build")
 
 	goBuildComment = []byte("//go:build")
 
-	errGoBuildWithoutBuild = errors.New("//go:build comment without // +build comment")
-	errMultipleGoBuild     = errors.New("multiple //go:build comments")
+	errMultipleGoBuild = errors.New("multiple //go:build comments")
 )
 
 func isGoBuildComment(line []byte) bool {
@@ -1516,12 +1509,12 @@ var binaryOnlyComment = []byte("//go:binary-only-package")
 // The rule is that in the file's leading run of // comments
 // and blank lines, which must be followed by a blank line
 // (to avoid including a Go package clause doc comment),
-// lines beginning with '// +build' are taken as build directives.
+// lines beginning with '//go:build' are taken as build directives.
 //
 // The file is accepted only if each such line lists something
 // matching the file. For example:
 //
-//	// +build windows linux
+//	//go:build windows linux
 //
 // marks the file as applicable only on Windows and Linux.
 //
@@ -1559,7 +1552,7 @@ func (ctxt *Context) shouldBuild(content []byte, allTags map[string]bool) (shoul
 				p = p[len(p):]
 			}
 			line = bytes.TrimSpace(line)
-			if !bytes.HasPrefix(line, bSlashSlash) || !bytes.Contains(line, bPlusBuild) {
+			if !bytes.HasPrefix(line, slashSlash) || !bytes.Contains(line, plusBuild) {
 				continue
 			}
 			text := string(line)
@@ -1580,7 +1573,7 @@ func (ctxt *Context) shouldBuild(content []byte, allTags map[string]bool) (shoul
 func parseFileHeader(content []byte) (trimmed, goBuild []byte, sawBinaryOnly bool, err error) {
 	end := 0
 	p := content
-	ended := false       // found non-blank, non-// line, so stopped accepting // +build lines
+	ended := false       // found non-blank, non-// line, so stopped accepting //go:build lines
 	inSlashStar := false // in /* */ comment
 
 Lines:
@@ -1596,7 +1589,7 @@ Lines:
 			// Remember position of most recent blank line.
 			// When we find the first non-blank, non-// line,
 			// this "end" position marks the latest file position
-			// where a // +build line can appear.
+			// where a //go:build line can appear.
 			// (It must appear _before_ a blank line before the non-blank, non-// line.
 			// Yes, that's confusing, which is part of why we moved to //go:build lines.)
 			// Note that ended==false here means that inSlashStar==false,
@@ -1628,12 +1621,12 @@ Lines:
 				}
 				continue Lines
 			}
-			if bytes.HasPrefix(line, bSlashSlash) {
+			if bytes.HasPrefix(line, slashSlash) {
 				continue Lines
 			}
-			if bytes.HasPrefix(line, bSlashStar) {
+			if bytes.HasPrefix(line, slashStar) {
 				inSlashStar = true
-				line = bytes.TrimSpace(line[len(bSlashStar):])
+				line = bytes.TrimSpace(line[len(slashStar):])
 				continue Comments
 			}
 			// Found non-comment text.
@@ -1883,11 +1876,13 @@ func (ctxt *Context) eval(x constraint.Expr, allTags map[string]bool) bool {
 //	cgo (if cgo is enabled)
 //	$GOOS
 //	$GOARCH
-//	boringcrypto
 //	ctxt.Compiler
 //	linux (if GOOS = android)
 //	solaris (if GOOS = illumos)
-//	tag (if tag is listed in ctxt.BuildTags or ctxt.ReleaseTags)
+//	darwin (if GOOS = ios)
+//	unix (if this is a Unix GOOS)
+//	boringcrypto (if GOEXPERIMENT=boringcrypto is enabled)
+//	tag (if tag is listed in ctxt.BuildTags, ctxt.ToolTags, or ctxt.ReleaseTags)
 //
 // It records all consulted tags in allTags.
 func (ctxt *Context) matchTag(name string, allTags map[string]bool) bool {
