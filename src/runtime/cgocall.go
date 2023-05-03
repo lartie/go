@@ -86,6 +86,7 @@ package runtime
 
 import (
 	"internal/goarch"
+	"internal/goexperiment"
 	"runtime/internal/sys"
 	"unsafe"
 )
@@ -135,7 +136,6 @@ func cgocall(fn, arg unsafe.Pointer) int32 {
 
 	mp := getg().m
 	mp.ncgocall++
-	mp.ncgo++
 
 	// Reset traceback.
 	mp.cgoCallers[0] = 0
@@ -164,6 +164,14 @@ func cgocall(fn, arg unsafe.Pointer) int32 {
 	osPreemptExtEnter(mp)
 
 	mp.incgo = true
+	// We use ncgo as a check during execution tracing for whether there is
+	// any C on the call stack, which there will be after this point. If
+	// there isn't, we can use frame pointer unwinding to collect call
+	// stacks efficiently. This will be the case for the first Go-to-C call
+	// on a stack, so it's prefereable to update it here, after we emit a
+	// trace event in entersyscall above.
+	mp.ncgo++
+
 	errno := asmcgocall(fn, arg)
 
 	// Update accounting before exitsyscall because exitsyscall may
@@ -228,6 +236,9 @@ func cgocallbackg(fn, frame unsafe.Pointer, ctxt uintptr) {
 	savedpc := gp.syscallpc
 	exitsyscall() // coming out of cgo call
 	gp.m.incgo = false
+	if gp.m.isextra {
+		gp.m.isExtraInC = false
+	}
 
 	osPreemptExtExit(gp.m)
 
@@ -238,6 +249,9 @@ func cgocallbackg(fn, frame unsafe.Pointer, ctxt uintptr) {
 	// This is enforced by checking incgo in the schedule function.
 
 	gp.m.incgo = true
+	if gp.m.isextra {
+		gp.m.isExtraInC = true
+	}
 
 	if gp.m != checkm {
 		throw("m changed unexpectedly in cgocallbackg")
@@ -346,12 +360,12 @@ func unwindm(restore *bool) {
 	}
 }
 
-// called from assembly
+// called from assembly.
 func badcgocallback() {
 	throw("misaligned stack in cgocallback")
 }
 
-// called from (incomplete) assembly
+// called from (incomplete) assembly.
 func cgounimpl() {
 	throw("cgo not implemented")
 }
@@ -391,7 +405,7 @@ var racecgosync uint64 // represents possible synchronization in C code
 // cgoCheckPointer checks if the argument contains a Go pointer that
 // points to a Go pointer, and panics if it does.
 func cgoCheckPointer(ptr any, arg any) {
-	if debug.cgocheck == 0 {
+	if !goexperiment.CgoCheck2 && debug.cgocheck == 0 {
 		return
 	}
 
@@ -631,7 +645,7 @@ func cgoInRange(p unsafe.Pointer, start, end uintptr) bool {
 // exported Go function. It panics if the result is or contains a Go
 // pointer.
 func cgoCheckResult(val any) {
-	if debug.cgocheck == 0 {
+	if !goexperiment.CgoCheck2 && debug.cgocheck == 0 {
 		return
 	}
 

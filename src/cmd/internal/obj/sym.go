@@ -85,7 +85,7 @@ func (ctxt *Link) LookupABI(name string, abi ABI) *LSym {
 	return ctxt.LookupABIInit(name, abi, nil)
 }
 
-// LookupABI looks up a symbol with the given ABI.
+// LookupABIInit looks up a symbol with the given ABI.
 // If it does not exist, it creates it and
 // passes it to init for one-time initialization.
 func (ctxt *Link) LookupABIInit(name string, abi ABI, init func(s *LSym)) *LSym {
@@ -367,6 +367,8 @@ func (ctxt *Link) traverseSyms(flag traverseFlag, fn func(*LSym)) {
 						fn(aux)
 					}
 					ctxt.traverseFuncAux(flag, s, f, files)
+				} else if v := s.VarInfo(); v != nil {
+					fnNoNil(v.dwarfInfoSym)
 				}
 			}
 			if flag&traversePcdata != 0 && s.Type == objabi.STEXT {
@@ -410,22 +412,22 @@ func (ctxt *Link) traverseFuncAux(flag traverseFlag, fsym *LSym, fn func(parent 
 		if call.Func != nil {
 			fn(fsym, call.Func)
 		}
-		f, _ := linkgetlineFromPos(ctxt, call.Pos)
+		f, _ := ctxt.getFileSymbolAndLine(call.Pos)
 		if filesym := ctxt.Lookup(f); filesym != nil {
 			fn(fsym, filesym)
 		}
 	}
 
-	dwsyms := []*LSym{fninfo.dwarfRangesSym, fninfo.dwarfLocSym, fninfo.dwarfDebugLinesSym, fninfo.dwarfInfoSym}
-	for _, dws := range dwsyms {
-		if dws == nil || dws.Size == 0 {
+	auxsyms := []*LSym{fninfo.dwarfRangesSym, fninfo.dwarfLocSym, fninfo.dwarfDebugLinesSym, fninfo.dwarfInfoSym, fninfo.WasmImportSym, fninfo.sehUnwindInfoSym}
+	for _, s := range auxsyms {
+		if s == nil || s.Size == 0 {
 			continue
 		}
-		fn(fsym, dws)
+		fn(fsym, s)
 		if flag&traverseRefs != 0 {
-			for _, r := range dws.R {
+			for _, r := range s.R {
 				if r.Sym != nil {
-					fn(dws, r.Sym)
+					fn(s, r.Sym)
 				}
 			}
 		}
@@ -443,10 +445,11 @@ func (ctxt *Link) traverseAuxSyms(flag traverseFlag, fn func(parent *LSym, aux *
 					fn(s, s.Gotype)
 				}
 			}
-			if s.Type != objabi.STEXT {
-				continue
+			if s.Type == objabi.STEXT {
+				ctxt.traverseFuncAux(flag, s, fn, files)
+			} else if v := s.VarInfo(); v != nil && v.dwarfInfoSym != nil {
+				fn(s, v.dwarfInfoSym)
 			}
-			ctxt.traverseFuncAux(flag, s, fn, files)
 		}
 	}
 }

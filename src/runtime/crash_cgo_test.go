@@ -8,6 +8,8 @@ package runtime_test
 
 import (
 	"fmt"
+	"internal/goos"
+	"internal/platform"
 	"internal/testenv"
 	"os"
 	"os/exec"
@@ -217,7 +219,9 @@ func TestCgoCCodeSIGPROF(t *testing.T) {
 }
 
 func TestCgoPprofCallback(t *testing.T) {
-	t.Parallel()
+	if testing.Short() {
+		t.Skip("skipping in short mode") // takes a full second
+	}
 	switch runtime.GOOS {
 	case "windows", "plan9":
 		t.Skipf("skipping cgo pprof callback test on %s", runtime.GOOS)
@@ -364,8 +368,12 @@ func TestCgoPprofThreadNoTraceback(t *testing.T) {
 }
 
 func TestRaceProf(t *testing.T) {
-	if (runtime.GOOS != "linux" && runtime.GOOS != "freebsd") || runtime.GOARCH != "amd64" {
-		t.Skipf("not yet supported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	if !platform.RaceDetectorSupported(runtime.GOOS, runtime.GOARCH) {
+		t.Skipf("skipping on %s/%s because race detector not supported", runtime.GOOS, runtime.GOARCH)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skipf("skipping: test requires pthread support")
+		// TODO: Can this test be rewritten to use the C11 thread API instead?
 	}
 
 	testenv.MustHaveGoRun(t)
@@ -392,10 +400,18 @@ func TestRaceProf(t *testing.T) {
 }
 
 func TestRaceSignal(t *testing.T) {
-	t.Parallel()
-	if (runtime.GOOS != "linux" && runtime.GOOS != "freebsd") || runtime.GOARCH != "amd64" {
-		t.Skipf("not yet supported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	if !platform.RaceDetectorSupported(runtime.GOOS, runtime.GOARCH) {
+		t.Skipf("skipping on %s/%s because race detector not supported", runtime.GOOS, runtime.GOARCH)
 	}
+	if runtime.GOOS == "windows" {
+		t.Skipf("skipping: test requires pthread support")
+		// TODO: Can this test be rewritten to use the C11 thread API instead?
+	}
+	if runtime.GOOS == "darwin" || runtime.GOOS == "ios" {
+		testenv.SkipFlaky(t, 59807)
+	}
+
+	t.Parallel()
 
 	testenv.MustHaveGoRun(t)
 
@@ -515,12 +531,21 @@ func TestCgoTracebackSigpanic(t *testing.T) {
 	t.Parallel()
 	got := runTestProg(t, "testprogcgo", "TracebackSigpanic")
 	t.Log(got)
-	want := "runtime.sigpanic"
+	// We should see the function that calls the C function.
+	want := "main.TracebackSigpanic"
 	if !strings.Contains(got, want) {
+		if runtime.GOOS == "android" && (runtime.GOARCH == "arm" || runtime.GOARCH == "arm64") {
+			testenv.SkipFlaky(t, 58794)
+		}
 		t.Errorf("did not see %q in output", want)
 	}
+	// We shouldn't inject a sigpanic call. (see issue 57698)
+	nowant := "runtime.sigpanic"
+	if strings.Contains(got, nowant) {
+		t.Errorf("unexpectedly saw %q in output", nowant)
+	}
 	// No runtime errors like "runtime: unexpected return pc".
-	nowant := "runtime: "
+	nowant = "runtime: "
 	if strings.Contains(got, nowant) {
 		t.Errorf("unexpectedly saw %q in output", nowant)
 	}
@@ -751,5 +776,66 @@ func TestCgoTraceParserWithOneProc(t *testing.T) {
 		t.Skipf("skipping due to golang.org/issue/16755: %v", output)
 	} else if output != want {
 		t.Fatalf("GOMAXPROCS=1, want %s, got %s\n", want, output)
+	}
+}
+
+func TestCgoSigfwd(t *testing.T) {
+	t.Parallel()
+	if !goos.IsUnix {
+		t.Skipf("no signals on %s", runtime.GOOS)
+	}
+
+	got := runTestProg(t, "testprogcgo", "CgoSigfwd", "GO_TEST_CGOSIGFWD=1")
+	if want := "OK\n"; got != want {
+		t.Fatalf("expected %q, but got:\n%s", want, got)
+	}
+}
+
+func TestDestructorCallback(t *testing.T) {
+	t.Parallel()
+	got := runTestProg(t, "testprogcgo", "DestructorCallback")
+	if want := "OK\n"; got != want {
+		t.Errorf("expected %q, but got:\n%s", want, got)
+	}
+}
+
+func TestDestructorCallbackRace(t *testing.T) {
+	// This test requires building with -race,
+	// so it's somewhat slow.
+	if testing.Short() {
+		t.Skip("skipping test in -short mode")
+	}
+
+	if !platform.RaceDetectorSupported(runtime.GOOS, runtime.GOARCH) {
+		t.Skipf("skipping on %s/%s because race detector not supported", runtime.GOOS, runtime.GOARCH)
+	}
+
+	t.Parallel()
+
+	exe, err := buildTestProg(t, "testprogcgo", "-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := testenv.CleanCmdEnv(exec.Command(exe, "DestructorCallback")).CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := "OK\n"; string(got) != want {
+		t.Errorf("expected %q, but got:\n%s", want, got)
+	}
+}
+
+func TestEnsureBindM(t *testing.T) {
+	t.Parallel()
+	switch runtime.GOOS {
+	case "windows", "plan9":
+		t.Skipf("skipping bindm test on %s", runtime.GOOS)
+	}
+	got := runTestProg(t, "testprogcgo", "EnsureBindM")
+	want := "OK\n"
+	if got != want {
+		t.Errorf("expected %q, got %v", want, got)
 	}
 }

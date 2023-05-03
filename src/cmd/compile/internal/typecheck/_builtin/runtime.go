@@ -207,20 +207,20 @@ func strequal(p, q unsafe.Pointer) bool
 func interequal(p, q unsafe.Pointer) bool
 func nilinterequal(p, q unsafe.Pointer) bool
 
-func memhash(p unsafe.Pointer, h uintptr, size uintptr) uintptr
+func memhash(x *any, h uintptr, size uintptr) uintptr
 func memhash0(p unsafe.Pointer, h uintptr) uintptr
 func memhash8(p unsafe.Pointer, h uintptr) uintptr
 func memhash16(p unsafe.Pointer, h uintptr) uintptr
 func memhash32(p unsafe.Pointer, h uintptr) uintptr
 func memhash64(p unsafe.Pointer, h uintptr) uintptr
 func memhash128(p unsafe.Pointer, h uintptr) uintptr
-func f32hash(p unsafe.Pointer, h uintptr) uintptr
-func f64hash(p unsafe.Pointer, h uintptr) uintptr
-func c64hash(p unsafe.Pointer, h uintptr) uintptr
-func c128hash(p unsafe.Pointer, h uintptr) uintptr
-func strhash(a unsafe.Pointer, h uintptr) uintptr
-func interhash(p unsafe.Pointer, h uintptr) uintptr
-func nilinterhash(p unsafe.Pointer, h uintptr) uintptr
+func f32hash(p *any, h uintptr) uintptr
+func f64hash(p *any, h uintptr) uintptr
+func c64hash(p *any, h uintptr) uintptr
+func c128hash(p *any, h uintptr) uintptr
+func strhash(a *any, h uintptr) uintptr
+func interhash(p *any, h uintptr) uintptr
+func nilinterhash(p *any, h uintptr) uintptr
 
 // only used on 32-bit
 func int64div(int64, int64) int64
@@ -261,16 +261,16 @@ func asanwrite(addr, size uintptr)
 func checkptrAlignment(unsafe.Pointer, *byte, uintptr)
 func checkptrArithmetic(unsafe.Pointer, []unsafe.Pointer)
 
-func libfuzzerTraceCmp1(uint8, uint8, int)
-func libfuzzerTraceCmp2(uint16, uint16, int)
-func libfuzzerTraceCmp4(uint32, uint32, int)
-func libfuzzerTraceCmp8(uint64, uint64, int)
-func libfuzzerTraceConstCmp1(uint8, uint8, int)
-func libfuzzerTraceConstCmp2(uint16, uint16, int)
-func libfuzzerTraceConstCmp4(uint32, uint32, int)
-func libfuzzerTraceConstCmp8(uint64, uint64, int)
-func libfuzzerHookStrCmp(string, string, int)
-func libfuzzerHookEqualFold(string, string, int)
+func libfuzzerTraceCmp1(uint8, uint8, uint)
+func libfuzzerTraceCmp2(uint16, uint16, uint)
+func libfuzzerTraceCmp4(uint32, uint32, uint)
+func libfuzzerTraceCmp8(uint64, uint64, uint)
+func libfuzzerTraceConstCmp1(uint8, uint8, uint)
+func libfuzzerTraceConstCmp2(uint16, uint16, uint)
+func libfuzzerTraceConstCmp4(uint32, uint32, uint)
+func libfuzzerTraceConstCmp8(uint64, uint64, uint)
+func libfuzzerHookStrCmp(string, string, uint)
+func libfuzzerHookEqualFold(string, string, uint)
 
 func addCovMeta(p unsafe.Pointer, len uint32, hash [16]byte, pkpath string, pkgId int, cmode uint8, cgran uint8) uint32
 

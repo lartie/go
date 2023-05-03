@@ -50,6 +50,7 @@ func init() {
 	cf.StringVar(&testCPUProfile, "cpuprofile", "", "")
 	cf.Bool("failfast", false, "")
 	cf.StringVar(&testFuzz, "fuzz", "", "")
+	cf.Bool("fullpath", false, "")
 	cf.StringVar(&testList, "list", "", "")
 	cf.StringVar(&testMemProfile, "memprofile", "", "")
 	cf.String("memprofilerate", "", "")
@@ -64,11 +65,13 @@ func init() {
 	cf.String("fuzztime", "", "")
 	cf.String("fuzzminimizetime", "", "")
 	cf.StringVar(&testTrace, "trace", "", "")
-	cf.BoolVar(&testV, "v", false, "")
+	cf.Var(&testV, "v", "")
 	cf.Var(&testShuffle, "shuffle", "")
 
-	for name := range passFlagToTest {
-		cf.Var(cf.Lookup(name).Value, "test."+name, "")
+	for name, ok := range passFlagToTest {
+		if ok {
+			cf.Var(cf.Lookup(name).Value, "test."+name, "")
+		}
 	}
 }
 
@@ -342,9 +345,11 @@ func testFlags(args []string) (packageNames, passToTest []string) {
 
 	var injectedFlags []string
 	if testJSON {
-		// If converting to JSON, we need the full output in order to pipe it to
-		// test2json.
-		injectedFlags = append(injectedFlags, "-test.v=true")
+		// If converting to JSON, we need the full output in order to pipe it to test2json.
+		// The -test.v=test2json flag is like -test.v=true but causes the test to add
+		// extra ^V characters before testing output lines and other framing,
+		// which helps test2json do a better job creating the JSON events.
+		injectedFlags = append(injectedFlags, "-test.v=test2json")
 		delete(addFromGOFLAGS, "v")
 		delete(addFromGOFLAGS, "test.v")
 	}

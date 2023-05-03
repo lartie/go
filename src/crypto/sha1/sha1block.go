@@ -17,7 +17,7 @@ const (
 
 // blockGeneric is a portable, pure Go version of the SHA-1 block step.
 // It's used by sha1block_generic.go and tests.
-func blockGeneric(dig *digest, p []byte) {
+func blockGeneric[S []byte | string](dig *digest, p S) {
 	var w [16]uint32
 
 	h0, h1, h2, h3, h4 := dig.h[0], dig.h[1], dig.h[2], dig.h[3], dig.h[4]
@@ -42,7 +42,7 @@ func blockGeneric(dig *digest, p []byte) {
 		}
 		for ; i < 20; i++ {
 			tmp := w[(i-3)&0xf] ^ w[(i-8)&0xf] ^ w[(i-14)&0xf] ^ w[(i)&0xf]
-			w[i&0xf] = tmp<<1 | tmp>>(32-1)
+			w[i&0xf] = bits.RotateLeft32(tmp, 1)
 
 			f := b&c | (^b)&d
 			t := bits.RotateLeft32(a, 5) + f + e + w[i&0xf] + _K0
@@ -50,21 +50,21 @@ func blockGeneric(dig *digest, p []byte) {
 		}
 		for ; i < 40; i++ {
 			tmp := w[(i-3)&0xf] ^ w[(i-8)&0xf] ^ w[(i-14)&0xf] ^ w[(i)&0xf]
-			w[i&0xf] = tmp<<1 | tmp>>(32-1)
+			w[i&0xf] = bits.RotateLeft32(tmp, 1)
 			f := b ^ c ^ d
 			t := bits.RotateLeft32(a, 5) + f + e + w[i&0xf] + _K1
 			a, b, c, d, e = t, a, bits.RotateLeft32(b, 30), c, d
 		}
 		for ; i < 60; i++ {
 			tmp := w[(i-3)&0xf] ^ w[(i-8)&0xf] ^ w[(i-14)&0xf] ^ w[(i)&0xf]
-			w[i&0xf] = tmp<<1 | tmp>>(32-1)
+			w[i&0xf] = bits.RotateLeft32(tmp, 1)
 			f := ((b | c) & d) | (b & c)
 			t := bits.RotateLeft32(a, 5) + f + e + w[i&0xf] + _K2
 			a, b, c, d, e = t, a, bits.RotateLeft32(b, 30), c, d
 		}
 		for ; i < 80; i++ {
 			tmp := w[(i-3)&0xf] ^ w[(i-8)&0xf] ^ w[(i-14)&0xf] ^ w[(i)&0xf]
-			w[i&0xf] = tmp<<1 | tmp>>(32-1)
+			w[i&0xf] = bits.RotateLeft32(tmp, 1)
 			f := b ^ c ^ d
 			t := bits.RotateLeft32(a, 5) + f + e + w[i&0xf] + _K3
 			a, b, c, d, e = t, a, bits.RotateLeft32(b, 30), c, d

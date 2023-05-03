@@ -57,6 +57,10 @@ will be written to that directory.
 The build flags are shared by the build, clean, get, install, list, run,
 and test commands:
 
+	-C dir
+		Change to dir before running the command.
+		Any files named on the command line are interpreted after
+		changing directories.
 	-a
 		force rebuilding of packages that are already up-to-date.
 	-n
@@ -71,9 +75,9 @@ and test commands:
 		linux/ppc64le and linux/arm64 (only for 48-bit VMA).
 	-msan
 		enable interoperation with memory sanitizer.
-		Supported only on linux/amd64, linux/arm64
+		Supported only on linux/amd64, linux/arm64, freebsd/amd64
 		and only with Clang/LLVM as the host C compiler.
-		On linux/arm64, pie build mode will be used.
+		PIE build mode will be used on all platforms except linux/amd64.
 	-asan
 		enable interoperation with address sanitizer.
 		Supported only on linux/arm64, linux/amd64.
@@ -153,6 +157,13 @@ and test commands:
 		include path must be in the same directory as the Go package they are
 		included from, and overlays will not appear when binaries and tests are
 		run through go run and go test respectively.
+	-pgo file
+		specify the file path of a profile for profile-guided optimization (PGO).
+		When the special name "auto" is specified, for each main package in the
+		build, the go command selects a file named "default.pgo" in the package's
+		directory if that file exists, and applies it to the (transitive)
+		dependencies of the main package (other packages are not affected).
+		Special name "off" turns off PGO. The default is "auto".
 	-pkgdir dir
 		install and load all packages from dir instead of the usual locations.
 		For example, when building with a non-standard configuration,
@@ -281,6 +292,7 @@ const (
 // install, list, run, and test commands.
 func AddBuildFlags(cmd *base.Command, mask BuildFlagMask) {
 	base.AddBuildFlagsNX(&cmd.Flag)
+	base.AddChdirFlag(&cmd.Flag)
 	cmd.Flag.BoolVar(&cfg.BuildA, "a", false, "")
 	cmd.Flag.IntVar(&cfg.BuildP, "p", cfg.BuildP, "")
 	if mask&OmitVFlag == 0 {
@@ -306,6 +318,7 @@ func AddBuildFlags(cmd *base.Command, mask BuildFlagMask) {
 	cmd.Flag.StringVar(&cfg.BuildContext.InstallSuffix, "installsuffix", "", "")
 	cmd.Flag.Var(&load.BuildLdflags, "ldflags", "")
 	cmd.Flag.BoolVar(&cfg.BuildLinkshared, "linkshared", false, "")
+	cmd.Flag.StringVar(&cfg.BuildPGO, "pgo", "auto", "")
 	cmd.Flag.StringVar(&cfg.BuildPkgdir, "pkgdir", "", "")
 	cmd.Flag.BoolVar(&cfg.BuildRace, "race", false, "")
 	cmd.Flag.BoolVar(&cfg.BuildMSan, "msan", false, "")
@@ -319,6 +332,7 @@ func AddBuildFlags(cmd *base.Command, mask BuildFlagMask) {
 	// Undocumented, unstable debugging flags.
 	cmd.Flag.StringVar(&cfg.DebugActiongraph, "debug-actiongraph", "", "")
 	cmd.Flag.StringVar(&cfg.DebugTrace, "debug-trace", "", "")
+	cmd.Flag.StringVar(&cfg.DebugRuntimeTrace, "debug-runtime-trace", "", "")
 }
 
 // AddCoverFlags adds coverage-related flags to "cmd". If the
@@ -473,7 +487,7 @@ func runBuild(ctx context.Context, cmd *base.Command, args []string) {
 	pkgs = omitTestOnly(pkgsFilter(pkgs))
 
 	// Special case -o /dev/null by not writing at all.
-	if cfg.BuildO == os.DevNull {
+	if base.IsNull(cfg.BuildO) {
 		cfg.BuildO = ""
 	}
 
@@ -579,11 +593,18 @@ variable and the presence of a go.mod file. See 'go help modules' for details.
 If module-aware mode is enabled, "go install" runs in the context of the main
 module.
 
-When module-aware mode is disabled, other packages are installed in the
+When module-aware mode is disabled, non-main packages are installed in the
 directory $GOPATH/pkg/$GOOS_$GOARCH. When module-aware mode is enabled,
-other packages are built and cached but not installed.
+non-main packages are built and cached but not installed.
 
-For more about the build flags, see 'go help build'.
+Before Go 1.20, the standard library was installed to
+$GOROOT/pkg/$GOOS_$GOARCH.
+Starting in Go 1.20, the standard library is built and cached but not installed.
+Setting GODEBUG=installgoroot=all restores the use of
+$GOROOT/pkg/$GOOS_$GOARCH.
+
+For more about build flags, see 'go help build'.
+
 For more about specifying packages, see 'go help packages'.
 
 See also: go build, go get, go clean.
@@ -723,8 +744,6 @@ func InstallPackages(ctx context.Context, patterns []string, pkgs []*load.Packag
 	for _, p := range pkgs {
 		if p.Target == "" {
 			switch {
-			case p.Standard && p.ImportPath == "unsafe":
-				// unsafe is a built-in package, has no target
 			case p.Name != "main" && p.Internal.Local && p.ConflictDir == "":
 				// Non-executables outside GOPATH need not have a target:
 				// we can use the cache to hold the built package archive for use in future builds.
@@ -732,6 +751,11 @@ func InstallPackages(ctx context.Context, patterns []string, pkgs []*load.Packag
 				// or else something is wrong and worth reporting (like a ConflictDir).
 			case p.Name != "main" && p.Module != nil:
 				// Non-executables have no target (except the cache) when building with modules.
+			case p.Name != "main" && p.Standard && p.Internal.Build.PkgObj == "":
+				// Most packages in std do not need an installed .a, because they can be
+				// rebuilt and used directly from the build cache.
+				// A few targets (notably those using cgo) still do need to be installed
+				// in case the user's environment lacks a C compiler.
 			case p.Internal.GobinSubdir:
 				base.Errorf("go: cannot install cross-compiled binaries when GOBIN is set")
 			case p.Internal.CmdlineFiles:

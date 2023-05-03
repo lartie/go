@@ -96,10 +96,10 @@
 	FUNC4(a, b, c, d, e); \
 	MIX(a, b, c, d, e, 0xCA62C1D6)
 
-TEXT ·blockAMD64(SB),NOSPLIT,$64-32
+TEXT ·blockAMD64(SB),NOSPLIT,$64-24
 	MOVQ	dig+0(FP),	BP
-	MOVQ	p_base+8(FP),	SI
-	MOVQ	p_len+16(FP),	DX
+	MOVQ	p+8(FP),	SI
+	MOVQ	n+16(FP),	DX
 	SHRQ	$6,		DX
 	SHLQ	$6,		DX
 
@@ -518,7 +518,7 @@ end:
 #define CALC_F2_POST(REG_A,REG_B,REG_C,REG_E) \
 	XORL REG_B, REG_A \
 	ADDL R12, REG_E \
-        XORL REG_C, REG_A
+	XORL REG_C, REG_A
 
 #define CALC_19 \
 	CALC_F2_PRE(0x8c,DX,CX,AX) \
@@ -1430,11 +1430,11 @@ begin: \
 
 
 
-TEXT ·blockAVX2(SB),$1408-32
+TEXT ·blockAVX2(SB),$1408-24
 
 	MOVQ	dig+0(FP),	DI
-	MOVQ	p_base+8(FP),	SI
-	MOVQ	p_len+16(FP),	DX
+	MOVQ	p+8(FP),	SI
+	MOVQ	n+16(FP),	DX
 	SHRQ	$6,		DX
 	SHLQ	$6,		DX
 

@@ -11,6 +11,7 @@ import (
 	"go/ast"
 	"go/constant"
 	"go/token"
+	. "internal/types/errors"
 )
 
 // An operandMode specifies the (addressing) mode of an operand.
@@ -58,11 +59,11 @@ type operand struct {
 }
 
 // Pos returns the position of the expression corresponding to x.
-// If x is invalid the position is token.NoPos.
+// If x is invalid the position is nopos.
 func (x *operand) Pos() token.Pos {
 	// x.expr may not be set if x is invalid
 	if x.expr == nil {
-		return token.NoPos
+		return nopos
 	}
 	return x.expr.Pos()
 }
@@ -170,6 +171,10 @@ func operandString(x *operand, qf Qualifier) string {
 			if tpar, _ := x.typ.(*TypeParam); tpar != nil {
 				buf.WriteString(" constrained by ")
 				WriteType(&buf, tpar.bound, qf) // do not compute interface type sets here
+				// If we have the type set and it's empty, say so for better error messages.
+				if hasEmptyTypeset(tpar) {
+					buf.WriteString(" with empty type set")
+				}
 			}
 		} else {
 			buf.WriteString(" with invalid type")
@@ -228,7 +233,7 @@ func (x *operand) isNil() bool {
 // is only valid if the (first) result is false. The check parameter may be nil
 // if assignableTo is invoked through an exported API call, i.e., when all
 // methods have been type-checked.
-func (x *operand) assignableTo(check *Checker, T Type, cause *string) (bool, errorCode) {
+func (x *operand) assignableTo(check *Checker, T Type, cause *string) (bool, Code) {
 	if x.mode == invalid || T == Typ[Invalid] {
 		return true, 0 // avoid spurious errors
 	}
@@ -260,10 +265,10 @@ func (x *operand) assignableTo(check *Checker, T Type, cause *string) (bool, err
 				// don't need to do anything special.
 				newType, _, _ := check.implicitTypeAndValue(x, t.typ)
 				return newType != nil
-			}), _IncompatibleAssign
+			}), IncompatibleAssign
 		}
 		newType, _, _ := check.implicitTypeAndValue(x, T)
-		return newType != nil, _IncompatibleAssign
+		return newType != nil, IncompatibleAssign
 	}
 	// Vu is typed
 
@@ -277,20 +282,20 @@ func (x *operand) assignableTo(check *Checker, T Type, cause *string) (bool, err
 	// T is an interface type and x implements T and T is not a type parameter.
 	// Also handle the case where T is a pointer to an interface.
 	if _, ok := Tu.(*Interface); ok && Tp == nil || isInterfacePtr(Tu) {
-		if !check.implements(V, T, cause) {
-			return false, _InvalidIfaceAssign
+		if !check.implements(x.Pos(), V, T, false, cause) {
+			return false, InvalidIfaceAssign
 		}
 		return true, 0
 	}
 
 	// If V is an interface, check if a missing type assertion is the problem.
 	if Vi, _ := Vu.(*Interface); Vi != nil && Vp == nil {
-		if check.implements(T, V, nil) {
+		if check.implements(x.Pos(), T, V, false, nil) {
 			// T implements V, so give hint about type assertion.
 			if cause != nil {
 				*cause = "need type assertion"
 			}
-			return false, _IncompatibleAssign
+			return false, IncompatibleAssign
 		}
 	}
 
@@ -299,13 +304,13 @@ func (x *operand) assignableTo(check *Checker, T Type, cause *string) (bool, err
 	// and at least one of V or T is not a named type.
 	if Vc, ok := Vu.(*Chan); ok && Vc.dir == SendRecv {
 		if Tc, ok := Tu.(*Chan); ok && Identical(Vc.elem, Tc.elem) {
-			return !hasName(V) || !hasName(T), _InvalidChanAssign
+			return !hasName(V) || !hasName(T), InvalidChanAssign
 		}
 	}
 
 	// optimization: if we don't have type parameters, we're done
 	if Vp == nil && Tp == nil {
-		return false, _IncompatibleAssign
+		return false, IncompatibleAssign
 	}
 
 	errorf := func(format string, args ...any) {
@@ -322,7 +327,7 @@ func (x *operand) assignableTo(check *Checker, T Type, cause *string) (bool, err
 	// x is assignable to each specific type in T's type set.
 	if !hasName(V) && Tp != nil {
 		ok := false
-		code := _IncompatibleAssign
+		code := IncompatibleAssign
 		Tp.is(func(T *term) bool {
 			if T == nil {
 				return false // no specific types
@@ -343,7 +348,7 @@ func (x *operand) assignableTo(check *Checker, T Type, cause *string) (bool, err
 	if Vp != nil && !hasName(T) {
 		x := *x // don't clobber outer x
 		ok := false
-		code := _IncompatibleAssign
+		code := IncompatibleAssign
 		Vp.is(func(V *term) bool {
 			if V == nil {
 				return false // no specific types
@@ -359,5 +364,5 @@ func (x *operand) assignableTo(check *Checker, T Type, cause *string) (bool, err
 		return ok, code
 	}
 
-	return false, _IncompatibleAssign
+	return false, IncompatibleAssign
 }

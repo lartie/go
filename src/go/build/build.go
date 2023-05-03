@@ -13,8 +13,10 @@ import (
 	"go/doc"
 	"go/token"
 	"internal/buildcfg"
+	"internal/godebug"
 	"internal/goroot"
 	"internal/goversion"
+	"internal/platform"
 	"io"
 	"io/fs"
 	"os"
@@ -103,7 +105,7 @@ type Context struct {
 
 	// ReadDir returns a slice of fs.FileInfo, sorted by Name,
 	// describing the content of the named directory.
-	// If ReadDir is nil, Import uses ioutil.ReadDir.
+	// If ReadDir is nil, Import uses os.ReadDir.
 	ReadDir func(dir string) ([]fs.FileInfo, error)
 
 	// OpenFile opens a file (not a directory) for reading.
@@ -344,7 +346,7 @@ func defaultContext() Context {
 	default:
 		// cgo must be explicitly enabled for cross compilation builds
 		if runtime.GOARCH == c.GOARCH && runtime.GOOS == c.GOOS {
-			c.CgoEnabled = cgoEnabled[c.GOOS+"/"+c.GOARCH]
+			c.CgoEnabled = platform.CgoSupported(c.GOOS, c.GOARCH)
 			break
 		}
 		c.CgoEnabled = false
@@ -454,6 +456,11 @@ type Package struct {
 	TestGoFiles  []string // _test.go files in package
 	XTestGoFiles []string // _test.go files outside package
 
+	// Go directive comments (//go:zzz...) found in source files.
+	Directives      []Directive
+	TestDirectives  []Directive
+	XTestDirectives []Directive
+
 	// Dependency information
 	Imports        []string                    // import paths from GoFiles, CgoFiles
 	ImportPos      map[string][]token.Position // line information for Imports
@@ -473,6 +480,12 @@ type Package struct {
 	TestEmbedPatternPos  map[string][]token.Position // line information for TestEmbedPatterns
 	XTestEmbedPatterns   []string                    // patterns from XTestGoFiles
 	XTestEmbedPatternPos map[string][]token.Position // line information for XTestEmbedPatternPos
+}
+
+// A Directive is a Go directive comment (//go:zzz...) found in a source file.
+type Directive struct {
+	Text string         // full line comment including leading slashes
+	Pos  token.Position // position of comment
 }
 
 // IsCommand reports whether the package is considered a
@@ -519,6 +532,8 @@ func nameExt(name string) string {
 	}
 	return name[i:]
 }
+
+var installgoroot = godebug.New("installgoroot")
 
 // Import returns details about the Go package named by the import path,
 // interpreting local import paths relative to the srcDir directory.
@@ -777,8 +792,17 @@ Found:
 		p.PkgRoot = ctxt.joinPath(p.Root, "pkg")
 		p.BinDir = ctxt.joinPath(p.Root, "bin")
 		if pkga != "" {
+			// Always set PkgTargetRoot. It might be used when building in shared
+			// mode.
 			p.PkgTargetRoot = ctxt.joinPath(p.Root, pkgtargetroot)
-			p.PkgObj = ctxt.joinPath(p.Root, pkga)
+
+			// Set the install target if applicable.
+			if !p.Goroot || (installgoroot.Value() == "all" && p.ImportPath != "unsafe" && p.ImportPath != "builtin") {
+				if p.Goroot {
+					installgoroot.IncNonDefault()
+				}
+				p.PkgObj = ctxt.joinPath(p.Root, pkga)
+			}
 		}
 	}
 
@@ -815,14 +839,14 @@ Found:
 	}
 
 	var badGoError error
-	badFiles := make(map[string]bool)
-	badFile := func(name string, err error) {
+	badGoFiles := make(map[string]bool)
+	badGoFile := func(name string, err error) {
 		if badGoError == nil {
 			badGoError = err
 		}
-		if !badFiles[name] {
+		if !badGoFiles[name] {
 			p.InvalidGoFiles = append(p.InvalidGoFiles, name)
-			badFiles[name] = true
+			badGoFiles[name] = true
 		}
 	}
 
@@ -851,8 +875,8 @@ Found:
 		ext := nameExt(name)
 
 		info, err := ctxt.matchFile(p.Dir, name, allTags, &p.BinaryOnly, fset)
-		if err != nil {
-			badFile(name, err)
+		if err != nil && strings.HasSuffix(name, ".go") {
+			badGoFile(name, err)
 			continue
 		}
 		if info == nil {
@@ -865,7 +889,6 @@ Found:
 			}
 			continue
 		}
-		data, filename := info.header, info.name
 
 		// Going to save the file. For non-Go files, can stop here.
 		switch ext {
@@ -882,8 +905,10 @@ Found:
 			continue
 		}
 
+		data, filename := info.header, info.name
+
 		if info.parseErr != nil {
-			badFile(name, info.parseErr)
+			badGoFile(name, info.parseErr)
 			// Fall through: we might still have a partial AST in info.parsed,
 			// and we want to list files with parse errors anyway.
 		}
@@ -911,7 +936,7 @@ Found:
 			// TODO(#45999): The choice of p.Name is arbitrary based on file iteration
 			// order. Instead of resolving p.Name arbitrarily, we should clear out the
 			// existing name and mark the existing files as also invalid.
-			badFile(name, &MultiplePackageError{
+			badGoFile(name, &MultiplePackageError{
 				Dir:      p.Dir,
 				Packages: []string{p.Name, pkg},
 				Files:    []string{firstFile, name},
@@ -927,12 +952,12 @@ Found:
 			if line != 0 {
 				com, err := strconv.Unquote(qcom)
 				if err != nil {
-					badFile(name, fmt.Errorf("%s:%d: cannot parse import comment", filename, line))
+					badGoFile(name, fmt.Errorf("%s:%d: cannot parse import comment", filename, line))
 				} else if p.ImportComment == "" {
 					p.ImportComment = com
 					firstCommentFile = name
 				} else if p.ImportComment != com {
-					badFile(name, fmt.Errorf("found import comments %q (%s) and %q (%s) in %s", p.ImportComment, firstCommentFile, com, name, p.Dir))
+					badGoFile(name, fmt.Errorf("found import comments %q (%s) and %q (%s) in %s", p.ImportComment, firstCommentFile, com, name, p.Dir))
 				}
 			}
 		}
@@ -942,13 +967,13 @@ Found:
 		for _, imp := range info.imports {
 			if imp.path == "C" {
 				if isTest {
-					badFile(name, fmt.Errorf("use of cgo in test %s not supported", filename))
+					badGoFile(name, fmt.Errorf("use of cgo in test %s not supported", filename))
 					continue
 				}
 				isCgo = true
 				if imp.doc != nil {
 					if err := ctxt.saveCgo(filename, p, imp.doc); err != nil {
-						badFile(name, err)
+						badGoFile(name, err)
 					}
 				}
 			}
@@ -956,6 +981,7 @@ Found:
 
 		var fileList *[]string
 		var importMap, embedMap map[string][]token.Position
+		var directives *[]Directive
 		switch {
 		case isCgo:
 			allTags["cgo"] = true
@@ -963,6 +989,7 @@ Found:
 				fileList = &p.CgoFiles
 				importMap = importPos
 				embedMap = embedPos
+				directives = &p.Directives
 			} else {
 				// Ignore imports and embeds from cgo files if cgo is disabled.
 				fileList = &p.IgnoredGoFiles
@@ -971,14 +998,17 @@ Found:
 			fileList = &p.XTestGoFiles
 			importMap = xTestImportPos
 			embedMap = xTestEmbedPos
+			directives = &p.XTestDirectives
 		case isTest:
 			fileList = &p.TestGoFiles
 			importMap = testImportPos
 			embedMap = testEmbedPos
+			directives = &p.TestDirectives
 		default:
 			fileList = &p.GoFiles
 			importMap = importPos
 			embedMap = embedPos
+			directives = &p.Directives
 		}
 		*fileList = append(*fileList, name)
 		if importMap != nil {
@@ -990,6 +1020,9 @@ Found:
 			for _, emb := range info.embeds {
 				embedMap[emb.pattern] = append(embedMap[emb.pattern], emb.pos)
 			}
+		}
+		if directives != nil {
+			*directives = append(*directives, info.directives...)
 		}
 	}
 
@@ -1370,13 +1403,14 @@ var dummyPkg Package
 
 // fileInfo records information learned about a file included in a build.
 type fileInfo struct {
-	name     string // full name including dir
-	header   []byte
-	fset     *token.FileSet
-	parsed   *ast.File
-	parseErr error
-	imports  []fileImport
-	embeds   []fileEmbed
+	name       string // full name including dir
+	header     []byte
+	fset       *token.FileSet
+	parsed     *ast.File
+	parseErr   error
+	imports    []fileImport
+	embeds     []fileEmbed
+	directives []Directive
 }
 
 type fileImport struct {
@@ -1414,12 +1448,12 @@ func (ctxt *Context) matchFile(dir, name string, allTags map[string]bool, binary
 	}
 	ext := name[i:]
 
-	if !ctxt.goodOSArchFile(name, allTags) && !ctxt.UseAllFiles {
+	if ext != ".go" && fileListForExt(&dummyPkg, ext) == nil {
+		// skip
 		return nil, nil
 	}
 
-	if ext != ".go" && fileListForExt(&dummyPkg, ext) == nil {
-		// skip
+	if !ctxt.goodOSArchFile(name, allTags) && !ctxt.UseAllFiles {
 		return nil, nil
 	}
 
@@ -1445,7 +1479,7 @@ func (ctxt *Context) matchFile(dir, name string, allTags map[string]bool, binary
 	}
 	f.Close()
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %v", info.name, err)
+		return info, fmt.Errorf("read %s: %v", info.name, err)
 	}
 
 	// Look for go:build comments to accept or reject the file.

@@ -10,7 +10,6 @@ import (
 	"internal/coverage"
 	"internal/testenv"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -63,7 +62,7 @@ func runPkgCover(t *testing.T, outdir string, tag string, incfg string, mode str
 	outfiles, outfilelist := writeOutFileList(t, infiles, outdir, tag)
 	args := []string{"-pkgcfg", incfg, "-mode=" + mode, "-var=var" + tag, "-outfilelist", outfilelist}
 	args = append(args, infiles...)
-	cmd := exec.Command(testcover(t), args...)
+	cmd := testenv.Command(t, testcover(t), args...)
 	if errExpected {
 		errmsg := runExpectingError(cmd, t)
 		return nil, "", errmsg
@@ -129,7 +128,6 @@ func TestCoverWithCfg(t *testing.T) {
 		},
 	}
 
-	tag := "first"
 	var incfg string
 	for _, scenario := range scenarios {
 		// Instrument package "a", producing a set of instrumented output
@@ -138,6 +136,7 @@ func TestCoverWithCfg(t *testing.T) {
 		pname := "a"
 		mode := scenario.mode
 		gran := scenario.gran
+		tag := mode + "_" + gran
 		incfg = writePkgConfig(t, instdira, tag, ppath, pname, gran)
 		ofs, outcfg, _ := runPkgCover(t, instdira, tag, incfg, mode,
 			pfiles("a"), false)
@@ -147,7 +146,7 @@ func TestCoverWithCfg(t *testing.T) {
 		// buildable.
 		bargs := []string{"tool", "compile", "-p", "a", "-coveragecfg", outcfg}
 		bargs = append(bargs, ofs...)
-		cmd := exec.Command(testenv.GoToolPath(t), bargs...)
+		cmd := testenv.Command(t, testenv.GoToolPath(t), bargs...)
 		cmd.Dir = instdira
 		run(cmd, t)
 	}
@@ -158,6 +157,7 @@ func TestCoverWithCfg(t *testing.T) {
 	// Expect error if config file inaccessible/unreadable.
 	mode := "atomic"
 	errExpected := true
+	tag := "errors"
 	_, _, errmsg := runPkgCover(t, instdira, tag, "/not/a/file", mode,
 		pfiles("a"), errExpected)
 	want := "error reading pkgconfig file"
@@ -167,7 +167,7 @@ func TestCoverWithCfg(t *testing.T) {
 
 	// Expect err if config file contains unknown stuff.
 	t.Logf("mangling in config")
-	writeFile(t, incfg, []byte(fmt.Sprintf("blah=foo\n")))
+	writeFile(t, incfg, []byte("blah=foo\n"))
 	_, _, errmsg = runPkgCover(t, instdira, tag, incfg, mode,
 		pfiles("a"), errExpected)
 	want = "error reading pkgconfig file"
@@ -177,7 +177,7 @@ func TestCoverWithCfg(t *testing.T) {
 
 	// Expect error on empty config file.
 	t.Logf("writing empty config")
-	writeFile(t, incfg, []byte(fmt.Sprintf("\n")))
+	writeFile(t, incfg, []byte("\n"))
 	_, _, errmsg = runPkgCover(t, instdira, tag, incfg, mode,
 		pfiles("a"), errExpected)
 	if !strings.Contains(errmsg, want) {

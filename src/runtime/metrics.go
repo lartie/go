@@ -7,6 +7,7 @@ package runtime
 // Metrics implementation exported to runtime/metrics.
 
 import (
+	"internal/godebugs"
 	"unsafe"
 )
 
@@ -418,7 +419,39 @@ func initMetrics() {
 			},
 		},
 	}
+
+	for _, info := range godebugs.All {
+		if !info.Opaque {
+			metrics["/godebug/non-default-behavior/"+info.Name+":events"] = metricData{compute: compute0}
+		}
+	}
+
 	metricsInit = true
+}
+
+func compute0(_ *statAggregate, out *metricValue) {
+	out.kind = metricKindUint64
+	out.scalar = 0
+}
+
+type metricReader func() uint64
+
+func (f metricReader) compute(_ *statAggregate, out *metricValue) {
+	out.kind = metricKindUint64
+	out.scalar = f()
+}
+
+//go:linkname godebug_registerMetric internal/godebug.registerMetric
+func godebug_registerMetric(name string, read func() uint64) {
+	metricsLock()
+	initMetrics()
+	d, ok := metrics[name]
+	if !ok {
+		throw("runtime: unexpected metric registration for " + name)
+	}
+	d.compute = metricReader(read).compute
+	metrics[name] = d
+	metricsUnlock()
 }
 
 // statDep is a dependency on a group of statistics
@@ -446,7 +479,7 @@ func makeStatDepSet(deps ...statDep) statDepSet {
 	return s
 }
 
-// differennce returns set difference of s from b as a new set.
+// difference returns set difference of s from b as a new set.
 func (s statDepSet) difference(b statDepSet) statDepSet {
 	var c statDepSet
 	for i := range s {
@@ -594,7 +627,7 @@ func nsToSec(ns int64) float64 {
 // statAggregate is the main driver of the metrics implementation.
 //
 // It contains multiple aggregates of runtime statistics, as well
-// as a set of these aggregates that it has populated. The aggergates
+// as a set of these aggregates that it has populated. The aggregates
 // are populated lazily by its ensure method.
 type statAggregate struct {
 	ensured   statDepSet
@@ -626,7 +659,7 @@ func (a *statAggregate) ensure(deps *statDepSet) {
 	a.ensured = a.ensured.union(missing)
 }
 
-// metricValidKind is a runtime copy of runtime/metrics.ValueKind and
+// metricKind is a runtime copy of runtime/metrics.ValueKind and
 // must be kept structurally identical to that type.
 type metricKind int
 
@@ -686,6 +719,32 @@ type metricFloat64Histogram struct {
 // an argument to a dynamically-defined function, and we'd
 // like to avoid it escaping to the heap.
 var agg statAggregate
+
+type metricName struct {
+	name string
+	kind metricKind
+}
+
+// readMetricNames is the implementation of runtime/metrics.readMetricNames,
+// used by the runtime/metrics test and otherwise unreferenced.
+//
+//go:linkname readMetricNames runtime/metrics_test.runtime_readMetricNames
+func readMetricNames() []string {
+	metricsLock()
+	initMetrics()
+	n := len(metrics)
+	metricsUnlock()
+
+	list := make([]string, 0, n)
+
+	metricsLock()
+	for name := range metrics {
+		list = append(list, name)
+	}
+	metricsUnlock()
+
+	return list
+}
 
 // readMetrics is the implementation of runtime/metrics.Read.
 //

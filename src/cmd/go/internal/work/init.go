@@ -86,7 +86,7 @@ func BuildInit() {
 	}
 }
 
-// fuzzInstrumentFlags returns compiler flags that enable fuzzing instrumation
+// fuzzInstrumentFlags returns compiler flags that enable fuzzing instrumentation
 // on supported platforms.
 //
 // On unsupported platforms, fuzzInstrumentFlags returns nil, meaning no
@@ -149,9 +149,9 @@ func instrumentInit() {
 	mode := "race"
 	if cfg.BuildMSan {
 		mode = "msan"
-		// MSAN does not support non-PIE binaries on ARM64.
-		// See issue #33712 for details.
-		if cfg.Goos == "linux" && cfg.Goarch == "arm64" && cfg.BuildBuildmode == "default" {
+		// MSAN needs PIE on all platforms except linux/amd64.
+		// https://github.com/llvm/llvm-project/blob/llvmorg-13.0.1/clang/lib/Driver/SanitizerArgs.cpp#L621
+		if cfg.BuildBuildmode == "default" && (cfg.Goos != "linux" || cfg.Goarch != "amd64") {
 			cfg.BuildBuildmode = "pie"
 		}
 	}
@@ -160,7 +160,9 @@ func instrumentInit() {
 	}
 	modeFlag := "-" + mode
 
-	if !cfg.BuildContext.CgoEnabled {
+	// Check that cgo is enabled.
+	// Note: On macOS, -race does not require cgo. -asan and -msan still do.
+	if !cfg.BuildContext.CgoEnabled && (cfg.Goos != "darwin" || cfg.BuildASan || cfg.BuildMSan) {
 		if runtime.GOOS != cfg.Goos || runtime.GOARCH != cfg.Goarch {
 			fmt.Fprintf(os.Stderr, "go: %s requires cgo\n", modeFlag)
 		} else {
@@ -227,30 +229,12 @@ func buildModeInit() {
 		}
 		ldBuildmode = "c-shared"
 	case "default":
-		switch cfg.Goos {
-		case "android":
-			codegenArg = "-shared"
+		ldBuildmode = "exe"
+		if platform.DefaultPIE(cfg.Goos, cfg.Goarch, cfg.BuildRace) {
 			ldBuildmode = "pie"
-		case "windows":
-			if cfg.BuildRace {
-				ldBuildmode = "exe"
-			} else {
-				ldBuildmode = "pie"
-			}
-		case "ios":
-			codegenArg = "-shared"
-			ldBuildmode = "pie"
-		case "darwin":
-			switch cfg.Goarch {
-			case "arm64":
+			if cfg.Goos != "windows" && !gccgo {
 				codegenArg = "-shared"
 			}
-			fallthrough
-		default:
-			ldBuildmode = "exe"
-		}
-		if gccgo {
-			codegenArg = ""
 		}
 	case "exe":
 		pkgsFilter = pkgsMain
@@ -299,7 +283,7 @@ func buildModeInit() {
 		base.Fatalf("buildmode=%s not supported", cfg.BuildBuildmode)
 	}
 
-	if !platform.BuildModeSupported(cfg.BuildToolchainName, cfg.BuildBuildmode, cfg.Goos, cfg.Goarch) {
+	if cfg.BuildBuildmode != "default" && !platform.BuildModeSupported(cfg.BuildToolchainName, cfg.BuildBuildmode, cfg.Goos, cfg.Goarch) {
 		base.Fatalf("-buildmode=%s not supported on %s/%s\n", cfg.BuildBuildmode, cfg.Goos, cfg.Goarch)
 	}
 

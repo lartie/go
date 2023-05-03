@@ -6,6 +6,15 @@
 
 package sha256
 
-//go:noescape
+import "unsafe"
 
-func block(dig *digest, p []byte)
+//go:noescape
+func doBlock(dig *digest, p *byte, n int)
+
+func block(dig *digest, p []byte) {
+	doBlock(dig, unsafe.SliceData(p), len(p))
+}
+
+func blockString(dig *digest, s string) {
+	doBlock(dig, unsafe.StringData(s), len(s))
+}

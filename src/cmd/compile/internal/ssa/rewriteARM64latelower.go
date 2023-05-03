@@ -1,5 +1,4 @@
-// Code generated from gen/ARM64latelower.rules; DO NOT EDIT.
-// generated with: cd gen; go run *.go
+// Code generated from _gen/ARM64latelower.rules using 'go generate'; DO NOT EDIT.
 
 package ssa
 

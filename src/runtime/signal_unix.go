@@ -435,7 +435,7 @@ func sigtrampgo(sig uint32, info *siginfo, ctx unsafe.Pointer) {
 	c := &sigctxt{info, ctx}
 	gp := sigFetchG(c)
 	setg(gp)
-	if gp == nil {
+	if gp == nil || (gp.m != nil && gp.m.isExtraInC) {
 		if sig == _SIGPROF {
 			// Some platforms (Linux) have per-thread timers, which we use in
 			// combination with the process-wide timer. Avoid double-counting.
@@ -458,7 +458,18 @@ func sigtrampgo(sig uint32, info *siginfo, ctx unsafe.Pointer) {
 			return
 		}
 		c.fixsigcode(sig)
+		// Set g to nil here and badsignal will use g0 by needm.
+		// TODO: reuse the current m here by using the gsignal and adjustSignalStack,
+		// since the current g maybe a normal goroutine and actually running on the signal stack,
+		// it may hit stack split that is not expected here.
+		if gp != nil {
+			setg(nil)
+		}
 		badsignal(uintptr(sig), c)
+		// Restore g
+		if gp != nil {
+			setg(gp)
+		}
 		return
 	}
 
@@ -574,7 +585,7 @@ func adjustSignalStack(sig uint32, mp *m, gsigStack *gsignalStack) bool {
 
 	// sp is not within gsignal stack, g0 stack, or sigaltstack. Bad.
 	setg(nil)
-	needm()
+	needm(true)
 	if st.ss_flags&_SS_DISABLE != 0 {
 		noSignalStack(sig)
 	} else {
@@ -662,9 +673,13 @@ func sighandler(sig uint32, info *siginfo, ctxt unsafe.Pointer, gp *g) {
 	if sig < uint32(len(sigtable)) {
 		flags = sigtable[sig].flags
 	}
-	if !c.sigFromUser() && flags&_SigPanic != 0 && gp.throwsplit {
+	if !c.sigFromUser() && flags&_SigPanic != 0 && (gp.throwsplit || gp != mp.curg) {
 		// We can't safely sigpanic because it may grow the
 		// stack. Abort in the signal handler instead.
+		//
+		// Also don't inject a sigpanic if we are not on a
+		// user G stack. Either we're in the runtime, or we're
+		// running C code. Either way we cannot recover.
 		flags = _SigThrow
 	}
 	if isAbortPC(c.sigpc()) {
@@ -840,7 +855,14 @@ func sigpanic() {
 		if gp.paniconfault {
 			panicmemAddr(gp.sigcode1)
 		}
-		print("unexpected fault address ", hex(gp.sigcode1), "\n")
+		if inUserArenaChunk(gp.sigcode1) {
+			// We could check that the arena chunk is explicitly set to fault,
+			// but the fact that we faulted on accessing it is enough to prove
+			// that it is.
+			print("accessed data from freed user arena ", hex(gp.sigcode1), "\n")
+		} else {
+			print("unexpected fault address ", hex(gp.sigcode1), "\n")
+		}
 		throw("fault")
 	case _SIGFPE:
 		switch gp.sigcode0 {
@@ -951,16 +973,6 @@ func raisebadsignal(sig uint32, c *sigctxt) {
 
 //go:nosplit
 func crash() {
-	// OS X core dumps are linear dumps of the mapped memory,
-	// from the first virtual byte to the last, with zeros in the gaps.
-	// Because of the way we arrange the address space on 64-bit systems,
-	// this means the OS X core file will be >128 GB and even on a zippy
-	// workstation can take OS X well over an hour to write (uninterruptible).
-	// Save users from making that mistake.
-	if GOOS == "darwin" && GOARCH == "amd64" {
-		return
-	}
-
 	dieFromSignal(_SIGABRT)
 }
 
@@ -1032,8 +1044,6 @@ func signalDuringFork(sig uint32) {
 	throw("signal received during fork")
 }
 
-var badginsignalMsg = "fatal: bad g in signal handler\n"
-
 // This runs on a foreign stack, without an m or a g. No stack split.
 //
 //go:nosplit
@@ -1044,12 +1054,11 @@ func badsignal(sig uintptr, c *sigctxt) {
 		// There is no extra M. needm will not be able to grab
 		// an M. Instead of hanging, just crash.
 		// Cannot call split-stack function as there is no G.
-		s := stringStructOf(&badginsignalMsg)
-		write(2, s.str, int32(s.len))
+		writeErrStr("fatal: bad g in signal handler\n")
 		exit(2)
 		*(*uintptr)(unsafe.Pointer(uintptr(123))) = 2
 	}
-	needm()
+	needm(true)
 	if !sigsend(uint32(sig)) {
 		// A foreign thread received the signal sig, and the
 		// Go code does not want to handle it.
@@ -1117,8 +1126,9 @@ func sigfwdgo(sig uint32, info *siginfo, ctx unsafe.Pointer) bool {
 	//   (1) we weren't in VDSO page,
 	//   (2) we were in a goroutine (i.e., m.curg != nil), and
 	//   (3) we weren't in CGO.
+	//   (4) we weren't in dropped extra m.
 	gp := sigFetchG(c)
-	if gp != nil && gp.m != nil && gp.m.curg != nil && !gp.m.incgo {
+	if gp != nil && gp.m != nil && gp.m.curg != nil && !gp.m.isExtraInC && !gp.m.incgo {
 		return false
 	}
 
@@ -1309,8 +1319,8 @@ func setGsignalStack(st *stackt, old *gsignalStack) {
 	stsp := uintptr(unsafe.Pointer(st.ss_sp))
 	gp.m.gsignal.stack.lo = stsp
 	gp.m.gsignal.stack.hi = stsp + st.ss_size
-	gp.m.gsignal.stackguard0 = stsp + _StackGuard
-	gp.m.gsignal.stackguard1 = stsp + _StackGuard
+	gp.m.gsignal.stackguard0 = stsp + stackGuard
+	gp.m.gsignal.stackguard1 = stsp + stackGuard
 }
 
 // restoreGsignalStack restores the gsignal stack to the value it had

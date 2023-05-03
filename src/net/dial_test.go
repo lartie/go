@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !js
+//go:build !js && !wasip1
 
 package net
 
@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -882,18 +883,48 @@ func TestCancelAfterDial(t *testing.T) {
 // if the machine has halfway configured IPv6 such that it can bind on
 // "::" not connect back to that same address.
 func TestDialListenerAddr(t *testing.T) {
-	mustHaveExternalNetwork(t)
-	ln, err := Listen("tcp", ":0")
+	if !testableNetwork("tcp4") {
+		t.Skipf("skipping: can't listen on tcp4")
+	}
+
+	// The original issue report was for listening on just ":0" on a system that
+	// supports both tcp4 and tcp6 for external traffic but only tcp4 for loopback
+	// traffic. However, the port opened by ":0" is externally-accessible, and may
+	// trigger firewall alerts or otherwise be mistaken for malicious activity
+	// (see https://go.dev/issue/59497). Moreover, it often does not reproduce
+	// the scenario in the issue, in which the port *cannot* be dialed as tcp6.
+	//
+	// To address both of those problems, we open a tcp4-only localhost port, but
+	// then dial the address string that the listener would have reported for a
+	// dual-stack port.
+	ln, err := Listen("tcp4", "localhost:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	addr := ln.Addr().String()
-	c, err := Dial("tcp", addr)
+
+	t.Logf("listening on %q", ln.Addr())
+	_, port, err := SplitHostPort(ln.Addr().String())
 	if err != nil {
-		t.Fatalf("for addr %q, dial error: %v", addr, err)
+		t.Fatal(err)
+	}
+
+	// If we had opened a dual-stack port without an explicit "localhost" address,
+	// the Listener would arbitrarily report an empty tcp6 address in its Addr
+	// string.
+	//
+	// The documentation for Dial says ‘if the host is empty or a literal
+	// unspecified IP address, as in ":80", "0.0.0.0:80" or "[::]:80" for TCP and
+	// UDP, "", "0.0.0.0" or "::" for IP, the local system is assumed.’
+	// In #18806, it was decided that that should include the local tcp4 host
+	// even if the string is in the tcp6 format.
+	dialAddr := "[::]:" + port
+	c, err := Dial("tcp4", dialAddr)
+	if err != nil {
+		t.Fatalf(`Dial("tcp4", %q): %v`, dialAddr, err)
 	}
 	c.Close()
+	t.Logf(`Dial("tcp4", %q) succeeded`, dialAddr)
 }
 
 func TestDialerControl(t *testing.T) {
@@ -935,6 +966,36 @@ func TestDialerControl(t *testing.T) {
 				continue
 			}
 			c2.Close()
+		}
+	})
+}
+
+func TestDialerControlContext(t *testing.T) {
+	switch runtime.GOOS {
+	case "plan9":
+		t.Skipf("%s does not have full support of socktest", runtime.GOOS)
+	}
+	t.Run("StreamDial", func(t *testing.T) {
+		for i, network := range []string{"tcp", "tcp4", "tcp6", "unix", "unixpacket"} {
+			if !testableNetwork(network) {
+				continue
+			}
+			ln := newLocalListener(t, network)
+			defer ln.Close()
+			var id int
+			d := Dialer{ControlContext: func(ctx context.Context, network string, address string, c syscall.RawConn) error {
+				id = ctx.Value("id").(int)
+				return controlOnConnSetup(network, address, c)
+			}}
+			c, err := d.DialContext(context.WithValue(context.Background(), "id", i+1), network, ln.Addr().String())
+			if err != nil {
+				t.Error(err)
+				continue
+			}
+			if id != i+1 {
+				t.Errorf("got id %d, want %d", id, i+1)
+			}
+			c.Close()
 		}
 	})
 }

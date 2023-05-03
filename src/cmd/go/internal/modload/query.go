@@ -23,6 +23,7 @@ import (
 	"cmd/go/internal/modfetch/codehost"
 	"cmd/go/internal/modinfo"
 	"cmd/go/internal/search"
+	"cmd/go/internal/slices"
 	"cmd/go/internal/str"
 	"cmd/go/internal/trace"
 	"cmd/internal/pkgpattern"
@@ -768,7 +769,7 @@ func QueryPattern(ctx context.Context, pattern, query string, current func(strin
 			Query:   query,
 		}
 	}
-	return results[:len(results):len(results)], modOnly, err
+	return slices.Clip(results), modOnly, err
 }
 
 // modulePrefixesExcludingTarget returns all prefixes of path that may plausibly
@@ -1116,7 +1117,7 @@ func (rr *replacementRepo) Versions(prefix string) (*modfetch.Versions, error) {
 	for _, mm := range MainModules.Versions() {
 		if index := MainModules.Index(mm); index != nil && len(index.replace) > 0 {
 			path := rr.ModulePath()
-			for m, _ := range index.replace {
+			for m := range index.replace {
 				if m.Path == path && strings.HasPrefix(m.Version, prefix) && m.Version != "" && !module.IsPseudoVersion(m.Version) {
 					versions = append(versions, m.Version)
 				}

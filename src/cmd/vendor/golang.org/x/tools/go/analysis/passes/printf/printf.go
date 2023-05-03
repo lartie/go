@@ -910,7 +910,7 @@ func okPrintfArg(pass *analysis.Pass, call *ast.CallExpr, state *formatState) (o
 		if reason != "" {
 			details = " (" + reason + ")"
 		}
-		pass.ReportRangef(call, "%s format %s has arg %s of wrong type %s%s, see also https://pkg.go.dev/fmt#hdr-Printing", state.name, state.format, analysisutil.Format(pass.Fset, arg), typeString, details)
+		pass.ReportRangef(call, "%s format %s has arg %s of wrong type %s%s", state.name, state.format, analysisutil.Format(pass.Fset, arg), typeString, details)
 		return false
 	}
 	if v.typ&argString != 0 && v.verb != 'T' && !bytes.Contains(state.flags, []byte{'#'}) {
@@ -945,11 +945,16 @@ func recursiveStringer(pass *analysis.Pass, e ast.Expr) (string, bool) {
 		return "", false
 	}
 
+	// inScope returns true if e is in the scope of f.
+	inScope := func(e ast.Expr, f *types.Func) bool {
+		return f.Scope() != nil && f.Scope().Contains(e.Pos())
+	}
+
 	// Is the expression e within the body of that String or Error method?
 	var method *types.Func
-	if strOk && strMethod.Pkg() == pass.Pkg && strMethod.Scope().Contains(e.Pos()) {
+	if strOk && strMethod.Pkg() == pass.Pkg && inScope(e, strMethod) {
 		method = strMethod
-	} else if errOk && errMethod.Pkg() == pass.Pkg && errMethod.Scope().Contains(e.Pos()) {
+	} else if errOk && errMethod.Pkg() == pass.Pkg && inScope(e, errMethod) {
 		method = errMethod
 	} else {
 		return "", false

@@ -254,20 +254,10 @@ func (d *digest) Size() int {
 func (d *digest) BlockSize() int { return BlockSize }
 
 func (d *digest) Write(p []byte) (nn int, err error) {
-	if d.function != crypto.SHA512_224 && d.function != crypto.SHA512_256 {
-		boring.Unreachable()
-	}
 	nn = len(p)
 	d.len += uint64(nn)
-	if d.nx > 0 {
-		n := copy(d.x[d.nx:], p)
-		d.nx += n
-		if d.nx == chunk {
-			block(d, d.x[:])
-			d.nx = 0
-		}
-		p = p[n:]
-	}
+	n := fillChunk(d, p)
+	p = p[n:]
 	if len(p) >= chunk {
 		n := len(p) &^ (chunk - 1)
 		block(d, p[:n])
@@ -277,6 +267,59 @@ func (d *digest) Write(p []byte) (nn int, err error) {
 		d.nx = copy(d.x[:], p)
 	}
 	return
+}
+
+func (d *digest) WriteString(s string) (nn int, err error) {
+	nn = len(s)
+	d.len += uint64(nn)
+	n := fillChunk(d, s)
+
+	// This duplicates the code in Write, except that it calls
+	// blockString rather than block. It would be nicer to pass
+	// in a func, but as of this writing (Go 1.20) that causes
+	// memory allocations that we want to avoid.
+
+	s = s[n:]
+	if len(s) >= chunk {
+		n := len(s) &^ (chunk - 1)
+		blockString(d, s[:n])
+		s = s[n:]
+	}
+	if len(s) > 0 {
+		d.nx = copy(d.x[:], s)
+	}
+	return
+}
+
+// fillChunk fills the remainder of the current chunk, if any.
+func fillChunk[S []byte | string](d *digest, p S) int {
+	if d.function != crypto.SHA512_224 && d.function != crypto.SHA512_256 {
+		boring.Unreachable()
+	}
+	if d.nx == 0 {
+		return 0
+	}
+	n := copy(d.x[d.nx:], p)
+	d.nx += n
+	if d.nx == chunk {
+		block(d, d.x[:])
+		d.nx = 0
+	}
+	return n
+}
+
+func (d *digest) WriteByte(c byte) error {
+	if d.function != crypto.SHA512_224 && d.function != crypto.SHA512_256 {
+		boring.Unreachable()
+	}
+	d.len++
+	d.x[d.nx] = c
+	d.nx++
+	if d.nx == chunk {
+		block(d, d.x[:])
+		d.nx = 0
+	}
+	return nil
 }
 
 func (d *digest) Sum(in []byte) []byte {
@@ -302,19 +345,23 @@ func (d *digest) Sum(in []byte) []byte {
 func (d *digest) checkSum() [Size]byte {
 	// Padding. Add a 1 bit and 0 bits until 112 bytes mod 128.
 	len := d.len
-	var tmp [128]byte
+	var tmp [128 + 16]byte // padding + length buffer
 	tmp[0] = 0x80
+	var t uint64
 	if len%128 < 112 {
-		d.Write(tmp[0 : 112-len%128])
+		t = 112 - len%128
 	} else {
-		d.Write(tmp[0 : 128+112-len%128])
+		t = 128 + 112 - len%128
 	}
 
 	// Length in bits.
 	len <<= 3
-	binary.BigEndian.PutUint64(tmp[0:], 0) // upper 64 bits are always zero, because len variable has type uint64
-	binary.BigEndian.PutUint64(tmp[8:], len)
-	d.Write(tmp[0:16])
+	padlen := tmp[:t+16]
+	// Upper 64 bits are always zero, because len variable has type uint64,
+	// and tmp is already zeroed at that index, so we can skip updating it.
+	// binary.BigEndian.PutUint64(padlen[t+0:], 0)
+	binary.BigEndian.PutUint64(padlen[t+8:], len)
+	d.Write(padlen)
 
 	if d.nx != 0 {
 		panic("d.nx != 0")

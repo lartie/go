@@ -147,7 +147,7 @@ func (s *mspan) nextFreeIndex() uintptr {
 
 	aCache := s.allocCache
 
-	bitIndex := sys.Ctz64(aCache)
+	bitIndex := sys.TrailingZeros64(aCache)
 	for bitIndex == 64 {
 		// Move index to start of next cached bits.
 		sfreeindex = (sfreeindex + 64) &^ (64 - 1)
@@ -159,7 +159,7 @@ func (s *mspan) nextFreeIndex() uintptr {
 		// Refill s.allocCache with the next 64 alloc bits.
 		s.refillAllocCache(whichByte)
 		aCache = s.allocCache
-		bitIndex = sys.Ctz64(aCache)
+		bitIndex = sys.TrailingZeros64(aCache)
 		// nothing available in cached bits
 		// grab the next 8 bytes and try again.
 	}
@@ -191,7 +191,7 @@ func (s *mspan) nextFreeIndex() uintptr {
 // been no preemption points since ensuring this (which could allow a
 // GC transition, which would allow the state to change).
 func (s *mspan) isFree(index uintptr) bool {
-	if index < s.freeindex {
+	if index < s.freeIndexForScan {
 		return false
 	}
 	bytep, mask := s.allocBits.bitp(index)
@@ -364,7 +364,7 @@ func findObject(p, refBase, refOff uintptr) (base uintptr, s *mspan, objIndex ui
 	return
 }
 
-// verifyNotInHeapPtr reports whether converting the not-in-heap pointer into a unsafe.Pointer is ok.
+// reflect_verifyNotInHeapPtr reports whether converting the not-in-heap pointer into a unsafe.Pointer is ok.
 //
 //go:linkname reflect_verifyNotInHeapPtr reflect.verifyNotInHeapPtr
 func reflect_verifyNotInHeapPtr(p uintptr) bool {
@@ -452,9 +452,9 @@ func (h heapBits) next() (heapBits, uintptr) {
 		if h.mask != 0 {
 			var i int
 			if goarch.PtrSize == 8 {
-				i = sys.Ctz64(uint64(h.mask))
+				i = sys.TrailingZeros64(uint64(h.mask))
 			} else {
-				i = sys.Ctz32(uint32(h.mask))
+				i = sys.TrailingZeros32(uint32(h.mask))
 			}
 			h.mask ^= uintptr(1) << (i & (ptrBits - 1))
 			return h, h.addr + uintptr(i)*goarch.PtrSize
@@ -494,9 +494,9 @@ func (h heapBits) nextFast() (heapBits, uintptr) {
 	// BSFQ
 	var i int
 	if goarch.PtrSize == 8 {
-		i = sys.Ctz64(uint64(h.mask))
+		i = sys.TrailingZeros64(uint64(h.mask))
 	} else {
-		i = sys.Ctz32(uint32(h.mask))
+		i = sys.TrailingZeros32(uint32(h.mask))
 	}
 	// BTCQ
 	h.mask ^= uintptr(1) << (i & (ptrBits - 1))
@@ -528,7 +528,7 @@ func (h heapBits) nextFast() (heapBits, uintptr) {
 // make sure the underlying allocation contains pointers, usually
 // by checking typ.ptrdata.
 //
-// Callers must perform cgo checks if writeBarrier.cgo.
+// Callers must perform cgo checks if goexperiment.CgoCheck2.
 //
 //go:nosplit
 func bulkBarrierPreWrite(dst, src, size uintptr) {
@@ -573,9 +573,8 @@ func bulkBarrierPreWrite(dst, src, size uintptr) {
 				break
 			}
 			dstx := (*uintptr)(unsafe.Pointer(addr))
-			if !buf.putFast(*dstx, 0) {
-				wbBufFlush(nil, 0)
-			}
+			p := buf.get1()
+			p[0] = *dstx
 		}
 	} else {
 		for {
@@ -585,9 +584,9 @@ func bulkBarrierPreWrite(dst, src, size uintptr) {
 			}
 			dstx := (*uintptr)(unsafe.Pointer(addr))
 			srcx := (*uintptr)(unsafe.Pointer(src + (addr - dst)))
-			if !buf.putFast(*dstx, *srcx) {
-				wbBufFlush(nil, 0)
-			}
+			p := buf.get2()
+			p[0] = *dstx
+			p[1] = *srcx
 		}
 	}
 }
@@ -617,9 +616,8 @@ func bulkBarrierPreWriteSrcOnly(dst, src, size uintptr) {
 			break
 		}
 		srcx := (*uintptr)(unsafe.Pointer(addr - dst + src))
-		if !buf.putFast(0, *srcx) {
-			wbBufFlush(nil, 0)
-		}
+		p := buf.get1()
+		p[0] = *srcx
 	}
 }
 
@@ -650,14 +648,13 @@ func bulkBarrierBitmap(dst, src, size, maskOffset uintptr, bits *uint8) {
 		if *bits&mask != 0 {
 			dstx := (*uintptr)(unsafe.Pointer(dst + i))
 			if src == 0 {
-				if !buf.putFast(*dstx, 0) {
-					wbBufFlush(nil, 0)
-				}
+				p := buf.get1()
+				p[0] = *dstx
 			} else {
 				srcx := (*uintptr)(unsafe.Pointer(src + i))
-				if !buf.putFast(*dstx, *srcx) {
-					wbBufFlush(nil, 0)
-				}
+				p := buf.get2()
+				p[0] = *dstx
+				p[1] = *srcx
 			}
 		}
 		mask <<= 1
@@ -678,7 +675,7 @@ func bulkBarrierBitmap(dst, src, size, maskOffset uintptr, bits *uint8) {
 // Must not be preempted because it typically runs right before memmove,
 // and the GC must observe them as an atomic action.
 //
-// Callers must perform cgo checks if writeBarrier.cgo.
+// Callers must perform cgo checks if goexperiment.CgoCheck2.
 //
 //go:nosplit
 func typeBitsBulkBarrier(typ *_type, dst, src, size uintptr) {
@@ -709,18 +706,18 @@ func typeBitsBulkBarrier(typ *_type, dst, src, size uintptr) {
 		if bits&1 != 0 {
 			dstx := (*uintptr)(unsafe.Pointer(dst + i))
 			srcx := (*uintptr)(unsafe.Pointer(src + i))
-			if !buf.putFast(*dstx, *srcx) {
-				wbBufFlush(nil, 0)
-			}
+			p := buf.get2()
+			p[0] = *dstx
+			p[1] = *srcx
 		}
 	}
 }
 
 // initHeapBits initializes the heap bitmap for a span.
 // If this is a span of single pointer allocations, it initializes all
-// words to pointer.
-func (s *mspan) initHeapBits() {
-	if s.spanclass.noscan() {
+// words to pointer. If force is true, clears all bits.
+func (s *mspan) initHeapBits(forceClear bool) {
+	if forceClear || s.spanclass.noscan() {
 		// Set all the pointer bits to zero. We do this once
 		// when the span is allocated so we don't have to do it
 		// for each object allocation.
@@ -1400,16 +1397,7 @@ func dumpGCProg(p *byte) {
 
 // Testing.
 
-func getgcmaskcb(frame *stkframe, ctxt unsafe.Pointer) bool {
-	target := (*stkframe)(ctxt)
-	if frame.sp <= target.sp && target.sp < frame.varp {
-		*target = *frame
-		return false
-	}
-	return true
-}
-
-// gcbits returns the GC type info for x, for testing.
+// reflect_gcbits returns the GC type info for x, for testing.
 // The result is the bitmap entries (0 or 1), one entry per byte.
 //
 //go:linkname reflect_gcbits reflect.gcbits
@@ -1475,11 +1463,16 @@ func getgcmask(ep any) (mask []byte) {
 
 	// stack
 	if gp := getg(); gp.m.curg.stack.lo <= uintptr(p) && uintptr(p) < gp.m.curg.stack.hi {
-		var frame stkframe
-		frame.sp = uintptr(p)
-		gentraceback(gp.m.curg.sched.pc, gp.m.curg.sched.sp, 0, gp.m.curg, 0, nil, 1000, getgcmaskcb, noescape(unsafe.Pointer(&frame)), 0)
-		if frame.fn.valid() {
-			locals, _, _ := frame.getStackMap(nil, false)
+		found := false
+		var u unwinder
+		for u.initAt(gp.m.curg.sched.pc, gp.m.curg.sched.sp, 0, gp.m.curg, 0); u.valid(); u.next() {
+			if u.frame.sp <= uintptr(p) && uintptr(p) < u.frame.varp {
+				found = true
+				break
+			}
+		}
+		if found {
+			locals, _, _ := u.frame.getStackMap(nil, false)
 			if locals.n == 0 {
 				return
 			}
@@ -1487,7 +1480,7 @@ func getgcmask(ep any) (mask []byte) {
 			n := (*ptrtype)(unsafe.Pointer(t)).elem.size
 			mask = make([]byte, n/goarch.PtrSize)
 			for i := uintptr(0); i < n; i += goarch.PtrSize {
-				off := (uintptr(p) + i - frame.varp + size) / goarch.PtrSize
+				off := (uintptr(p) + i - u.frame.varp + size) / goarch.PtrSize
 				mask[i/goarch.PtrSize] = locals.ptrbit(off)
 			}
 		}

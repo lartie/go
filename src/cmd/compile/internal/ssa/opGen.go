@@ -1,4 +1,4 @@
-// Code generated from gen/*Ops.go; DO NOT EDIT.
+// Code generated from _gen/*Ops.go using 'go generate'; DO NOT EDIT.
 
 package ssa
 
@@ -456,6 +456,7 @@ const (
 	Op386NOTL
 	Op386BSFL
 	Op386BSFW
+	Op386LoweredCtz32
 	Op386BSRL
 	Op386BSRW
 	Op386BSWAPL
@@ -1669,6 +1670,8 @@ const (
 	OpARM64NotLessEqualF
 	OpARM64NotGreaterThanF
 	OpARM64NotGreaterEqualF
+	OpARM64LessThanNoov
+	OpARM64GreaterEqualNoov
 	OpARM64DUFFZERO
 	OpARM64LoweredZero
 	OpARM64DUFFCOPY
@@ -1716,9 +1719,12 @@ const (
 	OpLOONG64SUBV
 	OpLOONG64SUBVconst
 	OpLOONG64MULV
-	OpLOONG64MULVU
+	OpLOONG64MULHV
+	OpLOONG64MULHVU
 	OpLOONG64DIVV
 	OpLOONG64DIVVU
+	OpLOONG64REMV
+	OpLOONG64REMVU
 	OpLOONG64ADDF
 	OpLOONG64ADDD
 	OpLOONG64SUBF
@@ -1740,6 +1746,8 @@ const (
 	OpLOONG64NEGD
 	OpLOONG64SQRTD
 	OpLOONG64SQRTF
+	OpLOONG64MASKEQZ
+	OpLOONG64MASKNEZ
 	OpLOONG64SLLV
 	OpLOONG64SLLVconst
 	OpLOONG64SRLV
@@ -2159,6 +2167,9 @@ const (
 	OpPPC64XORCC
 	OpPPC64EQV
 	OpPPC64NEG
+	OpPPC64BRD
+	OpPPC64BRW
+	OpPPC64BRH
 	OpPPC64FNEG
 	OpPPC64FSQRT
 	OpPPC64FSQRTS
@@ -2237,7 +2248,9 @@ const (
 	OpPPC64CMPWconst
 	OpPPC64CMPWUconst
 	OpPPC64ISEL
-	OpPPC64ISELB
+	OpPPC64ISELZ
+	OpPPC64SETBC
+	OpPPC64SETBCR
 	OpPPC64Equal
 	OpPPC64NotEqual
 	OpPPC64LessThan
@@ -2959,6 +2972,7 @@ const (
 	OpBitLen16
 	OpBitLen32
 	OpBitLen64
+	OpBswap16
 	OpBswap32
 	OpBswap64
 	OpBitRev8
@@ -3005,6 +3019,7 @@ const (
 	OpLocalAddr
 	OpSP
 	OpSB
+	OpSPanchored
 	OpLoad
 	OpDereference
 	OpStore
@@ -3013,6 +3028,7 @@ const (
 	OpStoreWB
 	OpMoveWB
 	OpZeroWB
+	OpWBend
 	OpWB
 	OpHasCPUFeature
 	OpPanicBounds
@@ -5024,6 +5040,19 @@ var opcodeTable = [...]opInfo{
 		},
 	},
 	{
+		name:         "LoweredCtz32",
+		argLen:       1,
+		clobberFlags: true,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 239}, // AX CX DX BX BP SI DI
+			},
+			outputs: []outputInfo{
+				{0, 239}, // AX CX DX BX BP SI DI
+			},
+		},
+	},
+	{
 		name:         "BSRL",
 		argLen:       1,
 		clobberFlags: true,
@@ -6292,7 +6321,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -6314,16 +6343,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 128}, // DI
-				{1, 1},   // AX
-			},
 			clobbers: 65280, // X0 X1 X2 X3 X4 X5 X6 X7
+			outputs: []outputInfo{
+				{0, 128}, // DI
+			},
 		},
 	},
 	{
@@ -11562,15 +11589,15 @@ var opcodeTable = [...]opInfo{
 		name:         "CMOVQEQF",
 		argLen:       3,
 		resultInArg0: true,
+		needIntTemp:  true,
 		asm:          x86.ACMOVQNE,
 		reg: regInfo{
 			inputs: []inputInfo{
-				{0, 49134}, // CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 				{1, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
-			clobbers: 1, // AX
 			outputs: []outputInfo{
-				{0, 49134}, // CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
 		},
 	},
@@ -11623,15 +11650,15 @@ var opcodeTable = [...]opInfo{
 		name:         "CMOVLEQF",
 		argLen:       3,
 		resultInArg0: true,
+		needIntTemp:  true,
 		asm:          x86.ACMOVLNE,
 		reg: regInfo{
 			inputs: []inputInfo{
-				{0, 49134}, // CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 				{1, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
-			clobbers: 1, // AX
 			outputs: []outputInfo{
-				{0, 49134}, // CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
 		},
 	},
@@ -11684,15 +11711,15 @@ var opcodeTable = [...]opInfo{
 		name:         "CMOVWEQF",
 		argLen:       3,
 		resultInArg0: true,
+		needIntTemp:  true,
 		asm:          x86.ACMOVWNE,
 		reg: regInfo{
 			inputs: []inputInfo{
-				{0, 49134}, // CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 				{1, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
-			clobbers: 1, // AX
 			outputs: []outputInfo{
-				{0, 49134}, // CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
 		},
 	},
@@ -12117,11 +12144,11 @@ var opcodeTable = [...]opInfo{
 		name:         "SETEQF",
 		argLen:       1,
 		clobberFlags: true,
+		needIntTemp:  true,
 		asm:          x86.ASETEQ,
 		reg: regInfo{
-			clobbers: 1, // AX
 			outputs: []outputInfo{
-				{0, 49134}, // CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
 		},
 	},
@@ -12129,11 +12156,11 @@ var opcodeTable = [...]opInfo{
 		name:         "SETNEF",
 		argLen:       1,
 		clobberFlags: true,
+		needIntTemp:  true,
 		asm:          x86.ASETNE,
 		reg: regInfo{
-			clobbers: 1, // AX
 			outputs: []outputInfo{
-				{0, 49134}, // CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
+				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
 		},
 	},
@@ -13497,7 +13524,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -13519,16 +13546,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 128}, // DI
-				{1, 879}, // AX CX DX BX BP SI R8 R9
-			},
 			clobbers: 2147418112, // X0 X1 X2 X3 X4 X5 X6 X7 X8 X9 X10 X11 X12 X13 X14
+			outputs: []outputInfo{
+				{0, 2048}, // R11
+			},
 		},
 	},
 	{
@@ -13976,29 +14001,29 @@ var opcodeTable = [...]opInfo{
 		},
 	},
 	{
-		name:         "BLSRQ",
-		argLen:       1,
-		clobberFlags: true,
-		asm:          x86.ABLSRQ,
+		name:   "BLSRQ",
+		argLen: 1,
+		asm:    x86.ABLSRQ,
 		reg: regInfo{
 			inputs: []inputInfo{
 				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
 			outputs: []outputInfo{
+				{1, 0},
 				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
 		},
 	},
 	{
-		name:         "BLSRL",
-		argLen:       1,
-		clobberFlags: true,
-		asm:          x86.ABLSRL,
+		name:   "BLSRL",
+		argLen: 1,
+		asm:    x86.ABLSRL,
 		reg: regInfo{
 			inputs: []inputInfo{
 				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
 			outputs: []outputInfo{
+				{1, 0},
 				{0, 49135}, // AX CX DX BX BP SI DI R8 R9 R10 R11 R12 R13 R15
 			},
 		},
@@ -18359,7 +18384,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -18465,16 +18490,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 4}, // R2
-				{1, 8}, // R3
-			},
 			clobbers: 4294922240, // R12 R14 F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15
+			outputs: []outputInfo{
+				{0, 256}, // R8
+			},
 		},
 	},
 
@@ -22258,6 +22281,24 @@ var opcodeTable = [...]opInfo{
 		},
 	},
 	{
+		name:   "LessThanNoov",
+		argLen: 1,
+		reg: regInfo{
+			outputs: []outputInfo{
+				{0, 670826495}, // R0 R1 R2 R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R19 R20 R21 R22 R23 R24 R25 R26 R30
+			},
+		},
+	},
+	{
+		name:   "GreaterEqualNoov",
+		argLen: 1,
+		reg: regInfo{
+			outputs: []outputInfo{
+				{0, 670826495}, // R0 R1 R2 R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R19 R20 R21 R22 R23 R24 R25 R26 R30
+			},
+		},
+	},
+	{
 		name:           "DUFFZERO",
 		auxType:        auxInt64,
 		argLen:         2,
@@ -22325,7 +22366,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -22783,16 +22824,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 4}, // R2
-				{1, 8}, // R3
-			},
 			clobbers: 9223372035244359680, // R16 R17 R30 F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31
+			outputs: []outputInfo{
+				{0, 33554432}, // R25
+			},
 		},
 	},
 	{
@@ -22913,57 +22952,100 @@ var opcodeTable = [...]opInfo{
 		name:        "MULV",
 		argLen:      2,
 		commutative: true,
+		asm:         loong64.AMULV,
 		reg: regInfo{
 			inputs: []inputInfo{
-				{0, 1072496632}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
-				{1, 1072496632}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{0, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{1, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
 			},
 			outputs: []outputInfo{
-				{0, 65536},  // R17
-				{1, 131072}, // R18
+				{0, 1070596088}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R23 R24 R25 R26 R27 R28 R29 R31
 			},
 		},
 	},
 	{
-		name:        "MULVU",
+		name:        "MULHV",
 		argLen:      2,
 		commutative: true,
+		asm:         loong64.AMULHV,
 		reg: regInfo{
 			inputs: []inputInfo{
-				{0, 1072496632}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
-				{1, 1072496632}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{0, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{1, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
 			},
 			outputs: []outputInfo{
-				{0, 65536},  // R17
-				{1, 131072}, // R18
+				{0, 1070596088}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R23 R24 R25 R26 R27 R28 R29 R31
+			},
+		},
+	},
+	{
+		name:        "MULHVU",
+		argLen:      2,
+		commutative: true,
+		asm:         loong64.AMULHVU,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{1, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+			},
+			outputs: []outputInfo{
+				{0, 1070596088}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R23 R24 R25 R26 R27 R28 R29 R31
 			},
 		},
 	},
 	{
 		name:   "DIVV",
 		argLen: 2,
+		asm:    loong64.ADIVV,
 		reg: regInfo{
 			inputs: []inputInfo{
-				{0, 1072496632}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
-				{1, 1072496632}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{0, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{1, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
 			},
 			outputs: []outputInfo{
-				{0, 65536},  // R17
-				{1, 131072}, // R18
+				{0, 1070596088}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R23 R24 R25 R26 R27 R28 R29 R31
 			},
 		},
 	},
 	{
 		name:   "DIVVU",
 		argLen: 2,
+		asm:    loong64.ADIVVU,
 		reg: regInfo{
 			inputs: []inputInfo{
-				{0, 1072496632}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
-				{1, 1072496632}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{0, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{1, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
 			},
 			outputs: []outputInfo{
-				{0, 65536},  // R17
-				{1, 131072}, // R18
+				{0, 1070596088}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R23 R24 R25 R26 R27 R28 R29 R31
+			},
+		},
+	},
+	{
+		name:   "REMV",
+		argLen: 2,
+		asm:    loong64.AREMV,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{1, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+			},
+			outputs: []outputInfo{
+				{0, 1070596088}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R23 R24 R25 R26 R27 R28 R29 R31
+			},
+		},
+	},
+	{
+		name:   "REMVU",
+		argLen: 2,
+		asm:    loong64.AREMVU,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{1, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+			},
+			outputs: []outputInfo{
+				{0, 1070596088}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R23 R24 R25 R26 R27 R28 R29 R31
 			},
 		},
 	},
@@ -23260,6 +23342,34 @@ var opcodeTable = [...]opInfo{
 			},
 			outputs: []outputInfo{
 				{0, 4611686017353646080}, // F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31
+			},
+		},
+	},
+	{
+		name:   "MASKEQZ",
+		argLen: 2,
+		asm:    loong64.AMASKEQZ,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{1, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+			},
+			outputs: []outputInfo{
+				{0, 1070596088}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R23 R24 R25 R26 R27 R28 R29 R31
+			},
+		},
+	},
+	{
+		name:   "MASKNEZ",
+		argLen: 2,
+		asm:    loong64.AMASKNEZ,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+				{1, 1072693240}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31
+			},
+			outputs: []outputInfo{
+				{0, 1070596088}, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 R23 R24 R25 R26 R27 R28 R29 R31
 			},
 		},
 	},
@@ -24107,6 +24217,7 @@ var opcodeTable = [...]opInfo{
 		argLen:       1,
 		clobberFlags: true,
 		call:         true,
+		tailCall:     true,
 		reg: regInfo{
 			clobbers: 4611686018426339320, // R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19 R20 g R23 R24 R25 R26 R27 R28 R29 R31 F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31
 		},
@@ -24470,7 +24581,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -24490,16 +24601,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 67108864},  // R27
-				{1, 134217728}, // R28
-			},
 			clobbers: 4611686017353646082, // R1 F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31
+			outputs: []outputInfo{
+				{0, 268435456}, // R29
+			},
 		},
 	},
 	{
@@ -25950,7 +26059,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -25970,16 +26079,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 1048576}, // R20
-				{1, 2097152}, // R21
-			},
 			clobbers: 140737219919872, // R31 F0 F2 F4 F6 F8 F10 F12 F14 F16 F18 F20 F22 F24 F26 F28 F30 HI LO
+			outputs: []outputInfo{
+				{0, 16777216}, // R25
+			},
 		},
 	},
 	{
@@ -27625,7 +27732,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -27645,16 +27752,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 1048576}, // R20
-				{1, 2097152}, // R21
-			},
 			clobbers: 4611686018293170176, // R31 F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31 HI LO
+			outputs: []outputInfo{
+				{0, 16777216}, // R25
+			},
 		},
 	},
 	{
@@ -28977,6 +29082,45 @@ var opcodeTable = [...]opInfo{
 		},
 	},
 	{
+		name:   "BRD",
+		argLen: 1,
+		asm:    ppc64.ABRD,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1073733630}, // SP SB R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+			outputs: []outputInfo{
+				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+		},
+	},
+	{
+		name:   "BRW",
+		argLen: 1,
+		asm:    ppc64.ABRW,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1073733630}, // SP SB R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+			outputs: []outputInfo{
+				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+		},
+	},
+	{
+		name:   "BRH",
+		argLen: 1,
+		asm:    ppc64.ABRH,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1073733630}, // SP SB R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+			outputs: []outputInfo{
+				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+		},
+	},
+	{
 		name:   "FNEG",
 		argLen: 1,
 		asm:    ppc64.AFNEG,
@@ -29326,10 +29470,8 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:           "MOVDBRload",
-		auxType:        auxSymOff,
 		argLen:         2,
 		faultOnNilArg0: true,
-		symEffect:      SymRead,
 		asm:            ppc64.AMOVDBR,
 		reg: regInfo{
 			inputs: []inputInfo{
@@ -29342,10 +29484,8 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:           "MOVWBRload",
-		auxType:        auxSymOff,
 		argLen:         2,
 		faultOnNilArg0: true,
-		symEffect:      SymRead,
 		asm:            ppc64.AMOVWBR,
 		reg: regInfo{
 			inputs: []inputInfo{
@@ -29358,10 +29498,8 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:           "MOVHBRload",
-		auxType:        auxSymOff,
 		argLen:         2,
 		faultOnNilArg0: true,
-		symEffect:      SymRead,
 		asm:            ppc64.AMOVHBR,
 		reg: regInfo{
 			inputs: []inputInfo{
@@ -29540,10 +29678,8 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:           "MOVDBRstore",
-		auxType:        auxSym,
 		argLen:         3,
 		faultOnNilArg0: true,
-		symEffect:      SymWrite,
 		asm:            ppc64.AMOVDBR,
 		reg: regInfo{
 			inputs: []inputInfo{
@@ -29554,10 +29690,8 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:           "MOVWBRstore",
-		auxType:        auxSym,
 		argLen:         3,
 		faultOnNilArg0: true,
-		symEffect:      SymWrite,
 		asm:            ppc64.AMOVWBR,
 		reg: regInfo{
 			inputs: []inputInfo{
@@ -29568,10 +29702,8 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:           "MOVHBRstore",
-		auxType:        auxSym,
 		argLen:         3,
 		faultOnNilArg0: true,
-		symEffect:      SymWrite,
 		asm:            ppc64.AMOVHBR,
 		reg: regInfo{
 			inputs: []inputInfo{
@@ -30023,7 +30155,7 @@ var opcodeTable = [...]opInfo{
 		},
 	},
 	{
-		name:    "ISELB",
+		name:    "ISELZ",
 		auxType: auxInt32,
 		argLen:  2,
 		asm:     ppc64.AISEL,
@@ -30031,6 +30163,28 @@ var opcodeTable = [...]opInfo{
 			inputs: []inputInfo{
 				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
 			},
+			outputs: []outputInfo{
+				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+		},
+	},
+	{
+		name:    "SETBC",
+		auxType: auxInt32,
+		argLen:  1,
+		asm:     ppc64.ASETBC,
+		reg: regInfo{
+			outputs: []outputInfo{
+				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+		},
+	},
+	{
+		name:    "SETBCR",
+		auxType: auxInt32,
+		argLen:  1,
+		asm:     ppc64.ASETBCR,
+		reg: regInfo{
 			outputs: []outputInfo{
 				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
 			},
@@ -30138,7 +30292,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -30616,16 +30770,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 1048576}, // R20
-				{1, 2097152}, // R21
-			},
 			clobbers: 18446744072632408064, // R11 R12 R18 R19 R22 R23 R24 R25 R26 R27 R28 R29 R31 F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 XER
+			outputs: []outputInfo{
+				{0, 536870912}, // R29
+			},
 		},
 	},
 	{
@@ -30996,7 +31148,7 @@ var opcodeTable = [...]opInfo{
 		auxType:           auxSymOff,
 		argLen:            1,
 		rematerializeable: true,
-		symEffect:         SymRdWr,
+		symEffect:         SymAddr,
 		asm:               riscv.AMOV,
 		reg: regInfo{
 			inputs: []inputInfo{
@@ -31945,7 +32097,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -31965,16 +32117,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 16}, // X5
-				{1, 32}, // X6
-			},
 			clobbers: 9223372034707292160, // F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31
+			outputs: []outputInfo{
+				{0, 8388608}, // X24
+			},
 		},
 	},
 	{
@@ -34720,7 +34870,7 @@ var opcodeTable = [...]opInfo{
 		auxType:           auxSymOff,
 		argLen:            1,
 		rematerializeable: true,
-		symEffect:         SymRead,
+		symEffect:         SymAddr,
 		reg: regInfo{
 			inputs: []inputInfo{
 				{0, 4295000064}, // SP SB
@@ -34734,7 +34884,7 @@ var opcodeTable = [...]opInfo{
 		name:      "MOVDaddridx",
 		auxType:   auxSymOff,
 		argLen:    2,
-		symEffect: SymRead,
+		symEffect: SymAddr,
 		reg: regInfo{
 			inputs: []inputInfo{
 				{0, 4295000064}, // SP SB
@@ -35460,7 +35610,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -35520,16 +35670,14 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:         "LoweredWB",
-		auxType:      auxSym,
-		argLen:       3,
+		auxType:      auxInt64,
+		argLen:       1,
 		clobberFlags: true,
-		symEffect:    SymNone,
 		reg: regInfo{
-			inputs: []inputInfo{
-				{0, 4}, // R2
-				{1, 8}, // R3
-			},
 			clobbers: 4294918146, // R1 R14 F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15
+			outputs: []outputInfo{
+				{0, 512}, // R9
+			},
 		},
 	},
 	{
@@ -36169,7 +36317,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:              "LoweredGetCallerSP",
-		argLen:            0,
+		argLen:            1,
 		rematerializeable: true,
 		reg: regInfo{
 			outputs: []outputInfo{
@@ -36189,14 +36337,13 @@ var opcodeTable = [...]opInfo{
 		},
 	},
 	{
-		name:      "LoweredWB",
-		auxType:   auxSym,
-		argLen:    3,
-		symEffect: SymNone,
+		name:    "LoweredWB",
+		auxType: auxInt64,
+		argLen:  1,
 		reg: regInfo{
-			inputs: []inputInfo{
+			clobbers: 844424930131967, // R0 R1 R2 R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 F0 F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 F25 F26 F27 F28 F29 F30 F31 g
+			outputs: []outputInfo{
 				{0, 65535}, // R0 R1 R2 R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15
-				{1, 65535}, // R0 R1 R2 R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15
 			},
 		},
 	},
@@ -38514,6 +38661,11 @@ var opcodeTable = [...]opInfo{
 		generic: true,
 	},
 	{
+		name:    "Bswap16",
+		argLen:  1,
+		generic: true,
+	},
+	{
 		name:    "Bswap32",
 		argLen:  1,
 		generic: true,
@@ -38769,6 +38921,12 @@ var opcodeTable = [...]opInfo{
 		generic:   true,
 	},
 	{
+		name:      "SPanchored",
+		argLen:    2,
+		zeroWidth: true,
+		generic:   true,
+	},
+	{
 		name:    "Load",
 		argLen:  2,
 		generic: true,
@@ -38815,11 +38973,15 @@ var opcodeTable = [...]opInfo{
 		generic: true,
 	},
 	{
-		name:      "WB",
-		auxType:   auxSym,
-		argLen:    3,
-		symEffect: SymNone,
-		generic:   true,
+		name:    "WBend",
+		argLen:  1,
+		generic: true,
+	},
+	{
+		name:    "WB",
+		auxType: auxInt64,
+		argLen:  1,
+		generic: true,
 	},
 	{
 		name:      "HasCPUFeature",
@@ -39091,7 +39253,7 @@ var opcodeTable = [...]opInfo{
 	},
 	{
 		name:    "GetCallerSP",
-		argLen:  0,
+		argLen:  1,
 		generic: true,
 	},
 	{

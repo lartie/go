@@ -16,11 +16,11 @@ import (
 	"internal/coverage/encodemeta"
 	"internal/coverage/slicewriter"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"cmd/internal/edit"
@@ -74,7 +74,7 @@ var (
 
 var pkgconfig coverage.CoverPkgConfig
 
-var outputfiles []string // set whe -pkgcfg is in use
+var outputfiles []string // set when -pkgcfg is in use
 
 var profile string // The profile to read; the value of -html or -func
 
@@ -190,7 +190,7 @@ func parseFlags() error {
 }
 
 func readOutFileList(path string) ([]string, error) {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("error reading -outfilelist file %q: %v", path, err)
 	}
@@ -198,7 +198,7 @@ func readOutFileList(path string) ([]string, error) {
 }
 
 func readPackageConfig(path string) error {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("error reading pkgconfig file %q: %v", path, err)
 	}
@@ -382,8 +382,23 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		if n.Name.Name == "_" || n.Body == nil {
 			return nil
 		}
-		// Determine proper function or method name.
 		fname := n.Name.Name
+		// Skip AddUint32 and StoreUint32 if we're instrumenting
+		// sync/atomic itself in atomic mode (out of an abundance of
+		// caution), since as part of the instrumentation process we
+		// add calls to AddUint32/StoreUint32, and we don't want to
+		// somehow create an infinite loop.
+		//
+		// Note that in the current implementation (Go 1.20) both
+		// routines are assembly stubs that forward calls to the
+		// runtime/internal/atomic equivalents, hence the infinite
+		// loop scenario is purely theoretical (maybe if in some
+		// future implementation one of these functions might be
+		// written in Go). See #57445 for more details.
+		if atomicOnAtomic() && (fname == "AddUint32" || fname == "StoreUint32") {
+			return nil
+		}
+		// Determine proper function or method name.
 		if r := n.Recv; r != nil && len(r.List) == 1 {
 			t := r.List[0].Type
 			star := ""
@@ -426,7 +441,9 @@ func (f *File) Visit(node ast.Node) ast.Visitor {
 		if *pkgcfg != "" {
 			f.preFunc(n, fname)
 		}
-		ast.Walk(f, n.Body)
+		if pkgconfig.Granularity != "perfunc" {
+			ast.Walk(f, n.Body)
+		}
 		if *pkgcfg != "" {
 			flit := true
 			f.postFunc(n, fname, flit, n.Body)
@@ -465,6 +482,13 @@ func (f *File) preFunc(fn ast.Node, fname string) {
 }
 
 func (f *File) postFunc(fn ast.Node, funcname string, flit bool, body *ast.BlockStmt) {
+
+	// Tack on single counter write if we are in "perfunc" mode.
+	singleCtr := ""
+	if pkgconfig.Granularity == "perfunc" {
+		singleCtr = "; " + f.newCounter(fn.Pos(), fn.Pos(), 1)
+	}
+
 	// record the length of the counter var required.
 	nc := len(f.fn.units) + coverage.FirstCtrOffset
 	f.pkg.counterLengths = append(f.pkg.counterLengths, nc)
@@ -475,6 +499,16 @@ func (f *File) postFunc(fn ast.Node, funcname string, flit bool, body *ast.Block
 	ppath := pkgconfig.PkgPath
 	filename := ppath + "/" + filepath.Base(fnpos.Filename)
 
+	// The convention for cmd/cover is that if the go command that
+	// kicks off coverage specifies a local import path (e.g. "go test
+	// -cover ./thispackage"), the tool will capture full pathnames
+	// for source files instead of relative paths, which tend to work
+	// more smoothly for "go tool cover -html". See also issue #56433
+	// for more details.
+	if pkgconfig.Local {
+		filename = f.name
+	}
+
 	// Hand off function to meta-data builder.
 	fd := coverage.FuncDesc{
 		Funcname: funcname,
@@ -484,16 +518,36 @@ func (f *File) postFunc(fn ast.Node, funcname string, flit bool, body *ast.Block
 	}
 	funcId := f.mdb.AddFunc(fd)
 
-	// Generate the registration hook for the function, and insert it
-	// into the prolog.
-	cv := f.fn.counterVar
-	regHook := fmt.Sprintf("%s[0] = %d ; %s[1] = %s ; %s[2] = %d",
-		cv, len(f.fn.units), cv, mkPackageIdExpression(), cv, funcId)
+	hookWrite := func(cv string, which int, val string) string {
+		return fmt.Sprintf("%s[%d] = %s", cv, which, val)
+	}
+	if *mode == "atomic" {
+		hookWrite = func(cv string, which int, val string) string {
+			return fmt.Sprintf("%sStoreUint32(&%s[%d], %s)",
+				atomicPackagePrefix(), cv, which, val)
+		}
+	}
 
-	// Insert a function registration sequence into the function.
+	// Generate the registration hook sequence for the function. This
+	// sequence looks like
+	//
+	//   counterVar[0] = <num_units>
+	//   counterVar[1] = pkgId
+	//   counterVar[2] = fnId
+	//
+	cv := f.fn.counterVar
+	regHook := hookWrite(cv, 0, strconv.Itoa(len(f.fn.units))) + " ; " +
+		hookWrite(cv, 1, mkPackageIdExpression()) + " ; " +
+		hookWrite(cv, 2, strconv.Itoa(int(funcId))) + singleCtr
+
+	// Insert the registration sequence into the function. We want this sequence to
+	// appear before any counter updates, so use a hack to ensure that this edit
+	// applies before the edit corresponding to the prolog counter update.
+
 	boff := f.offset(body.Pos())
-	ipos := f.fset.File(body.Pos()).Pos(boff + 1)
-	f.edit.Insert(f.offset(ipos), regHook+" ; ")
+	ipos := f.fset.File(body.Pos()).Pos(boff)
+	ip := f.offset(ipos)
+	f.edit.Replace(ip, ip+1, string(f.content[ipos-1])+regHook+" ; ")
 
 	f.fn.counterVar = ""
 }
@@ -503,9 +557,6 @@ func annotate(names []string) {
 	if *pkgcfg != "" {
 		pp := pkgconfig.PkgPath
 		pn := pkgconfig.PkgName
-		if pn == "main" {
-			pp = "main"
-		}
 		mp := pkgconfig.ModulePath
 		mdb, err := encodemeta.NewCoverageMetaDataBuilder(pp, pn, mp)
 		if err != nil {
@@ -576,9 +627,13 @@ func (p *Package) annotateFile(name string, fd io.Writer, last bool) {
 		// We do this even if there is an existing import, because the
 		// existing import may be shadowed at any given place we want
 		// to refer to it, and our name (_cover_atomic_) is less likely to
-		// be shadowed.
-		file.edit.Insert(file.offset(file.astFile.Name.End()),
-			fmt.Sprintf("; import %s %q", atomicPackageName, atomicPackagePath))
+		// be shadowed. The one exception is if we're visiting the
+		// sync/atomic package itself, in which case we can refer to
+		// functions directly without an import prefix. See also #57445.
+		if pkgconfig.PkgPath != "sync/atomic" {
+			file.edit.Insert(file.offset(file.astFile.Name.End()),
+				fmt.Sprintf("; import %s %q", atomicPackageName, atomicPackagePath))
+		}
 	}
 	if pkgconfig.PkgName == "main" {
 		file.edit.Insert(file.offset(file.astFile.Name.End()),
@@ -590,7 +645,7 @@ func (p *Package) annotateFile(name string, fd io.Writer, last bool) {
 	}
 	newContent := file.edit.Bytes()
 
-	fmt.Fprintf(fd, "//line %s:1\n", name)
+	fmt.Fprintf(fd, "//line %s:1:1\n", name)
 	fd.Write(newContent)
 
 	// After printing the source tree, add some declarations for the
@@ -601,7 +656,7 @@ func (p *Package) annotateFile(name string, fd io.Writer, last bool) {
 	// Emit a reference to the atomic package to avoid
 	// import and not used error when there's no code in a file.
 	if *mode == "atomic" {
-		fmt.Fprintf(fd, "var _ = %s.LoadUint32\n", atomicPackageName)
+		fmt.Fprintf(fd, "\nvar _ = %sLoadUint32\n", atomicPackagePrefix())
 	}
 
 	// Last file? Emit meta-data and converage config.
@@ -622,7 +677,7 @@ func incCounterStmt(f *File, counter string) string {
 
 // atomicCounterStmt returns the expression: atomic.AddUint32(&__count[23], 1)
 func atomicCounterStmt(f *File, counter string) string {
-	return fmt.Sprintf("%s.AddUint32(&%s, 1)", atomicPackageName, counter)
+	return fmt.Sprintf("%sAddUint32(&%s, 1)", atomicPackagePrefix(), counter)
 }
 
 // newCounter creates a new counter expression of the appropriate form.
@@ -645,7 +700,6 @@ func (f *File) newCounter(start, end token.Pos, numStmt int) string {
 			NxStmts: uint32(numStmt),
 		}
 		f.fn.units = append(f.fn.units, unit)
-
 	} else {
 		stmt = counterStmt(f, fmt.Sprintf("%s.Count[%d]", *varVar,
 			len(f.blocks)))
@@ -1008,35 +1062,6 @@ func dedup(p1, p2 token.Position) (r1, r2 token.Position) {
 	return key.p1, key.p2
 }
 
-type sliceWriteSeeker struct {
-	payload []byte
-	off     int64
-}
-
-func (d *sliceWriteSeeker) Write(p []byte) (n int, err error) {
-	amt := len(p)
-	towrite := d.payload[d.off:]
-	if len(towrite) < amt {
-		d.payload = append(d.payload, make([]byte, amt-len(towrite))...)
-		towrite = d.payload[d.off:]
-	}
-	copy(towrite, p)
-	d.off += int64(amt)
-	return amt, nil
-}
-
-func (d *sliceWriteSeeker) Seek(offset int64, whence int) (int64, error) {
-	if whence == io.SeekStart {
-		d.off = offset
-		return offset, nil
-	} else if whence == io.SeekCurrent {
-		d.off += offset
-		return d.off, nil
-	}
-	// other modes not supported
-	panic("bad")
-}
-
 func (p *Package) emitMetaData(w io.Writer) {
 	if *pkgcfg == "" {
 		return
@@ -1091,4 +1116,21 @@ func (p *Package) emitMetaData(w io.Writer) {
 	if err := os.WriteFile(pkgconfig.OutConfig, fixdata, 0666); err != nil {
 		log.Fatalf("error writing %s: %v", pkgconfig.OutConfig, err)
 	}
+}
+
+// atomicOnAtomic returns true if we're instrumenting
+// the sync/atomic package AND using atomic mode.
+func atomicOnAtomic() bool {
+	return *mode == "atomic" && pkgconfig.PkgPath == "sync/atomic"
+}
+
+// atomicPackagePrefix returns the import path prefix used to refer to
+// our special import of sync/atomic; this is either set to the
+// constant atomicPackageName plus a dot or the empty string if we're
+// instrumenting the sync/atomic package itself.
+func atomicPackagePrefix() string {
+	if atomicOnAtomic() {
+		return ""
+	}
+	return atomicPackageName + "."
 }

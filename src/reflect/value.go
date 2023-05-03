@@ -2780,42 +2780,77 @@ func arrayAt(p unsafe.Pointer, i int, eltSize uintptr, whySafe string) unsafe.Po
 	return add(p, uintptr(i)*eltSize, "i < len")
 }
 
-// grow grows the slice s so that it can hold extra more values, allocating
-// more capacity if needed. It also returns the old and new slice lengths.
-func grow(s Value, extra int) (Value, int, int) {
-	i0 := s.Len()
-	i1 := i0 + extra
-	if i1 < i0 {
-		panic("reflect.Append: slice overflow")
+// Grow increases the slice's capacity, if necessary, to guarantee space for
+// another n elements. After Grow(n), at least n elements can be appended
+// to the slice without another allocation.
+//
+// It panics if v's Kind is not a Slice or if n is negative or too large to
+// allocate the memory.
+func (v Value) Grow(n int) {
+	v.mustBeAssignable()
+	v.mustBe(Slice)
+	v.grow(n)
+}
+
+// grow is identical to Grow but does not check for assignability.
+func (v Value) grow(n int) {
+	p := (*unsafeheader.Slice)(v.ptr)
+	switch {
+	case n < 0:
+		panic("reflect.Value.Grow: negative len")
+	case p.Len+n < 0:
+		panic("reflect.Value.Grow: slice overflow")
+	case p.Len+n > p.Cap:
+		t := v.typ.Elem().(*rtype)
+		*p = growslice(t, *p, n)
 	}
-	m := s.Cap()
-	if i1 <= m {
-		return s.Slice(0, i1), i0, i1
+}
+
+// extendSlice extends a slice by n elements.
+//
+// Unlike Value.grow, which modifies the slice in place and
+// does not change the length of the slice in place,
+// extendSlice returns a new slice value with the length
+// incremented by the number of specified elements.
+func (v Value) extendSlice(n int) Value {
+	v.mustBeExported()
+	v.mustBe(Slice)
+
+	// Shallow copy the slice header to avoid mutating the source slice.
+	sh := *(*unsafeheader.Slice)(v.ptr)
+	s := &sh
+	v.ptr = unsafe.Pointer(s)
+	v.flag = flagIndir | flag(Slice) // equivalent flag to MakeSlice
+
+	v.grow(n) // fine to treat as assignable since we allocate a new slice header
+	s.Len += n
+	return v
+}
+
+// Clear clears the contents of a map or zeros the contents of a slice.
+//
+// It panics if v's Kind is not Map or Slice.
+func (v Value) Clear() {
+	switch v.Kind() {
+	case Slice:
+		sh := *(*unsafeheader.Slice)(v.ptr)
+		st := (*sliceType)(unsafe.Pointer(v.typ))
+		typedarrayclear(st.elem, sh.Data, sh.Len)
+	case Map:
+		mapclear(v.typ, v.pointer())
+	default:
+		panic(&ValueError{"reflect.Value.Clear", v.Kind()})
 	}
-	if m == 0 {
-		m = extra
-	} else {
-		const threshold = 256
-		for m < i1 {
-			if i0 < threshold {
-				m += m
-			} else {
-				m += (m + 3*threshold) / 4
-			}
-		}
-	}
-	t := MakeSlice(s.Type(), i1, m)
-	Copy(t, s)
-	return t, i0, i1
 }
 
 // Append appends the values x to a slice s and returns the resulting slice.
 // As in Go, each x's value must be assignable to the slice's element type.
 func Append(s Value, x ...Value) Value {
 	s.mustBe(Slice)
-	s, i0, i1 := grow(s, len(x))
-	for i, j := i0, 0; i < i1; i, j = i+1, j+1 {
-		s.Index(i).Set(x[j])
+	n := s.Len()
+	s = s.extendSlice(len(x))
+	for i, v := range x {
+		s.Index(n + i).Set(v)
 	}
 	return s
 }
@@ -2826,8 +2861,10 @@ func AppendSlice(s, t Value) Value {
 	s.mustBe(Slice)
 	t.mustBe(Slice)
 	typesMustMatch("reflect.AppendSlice", s.Type().Elem(), t.Type().Elem())
-	s, i0, i1 := grow(s, t.Len())
-	Copy(s.Slice(i0, i1), t)
+	ns := s.Len()
+	nt := t.Len()
+	s = s.extendSlice(nt)
+	Copy(s.Slice(ns, ns+nt), t)
 	return s
 }
 
@@ -3263,7 +3300,8 @@ func (v Value) CanConvert(t Type) bool {
 
 // Comparable reports whether the value v is comparable.
 // If the type of v is an interface, this checks the dynamic type.
-// If this reports true then v.Interface() == x will not panic for any x.
+// If this reports true then v.Interface() == x will not panic for any x,
+// nor will v.Equal(u) for any Value u.
 func (v Value) Comparable() bool {
 	k := v.Kind()
 	switch k {
@@ -3299,21 +3337,77 @@ func (v Value) Comparable() bool {
 }
 
 // Equal reports true if v is equal to u.
-// For valid values, if either v or u is non-comparable, Equal returns false.
+// For two invalid values, Equal will report true.
+// For an interface value, Equal will compare the value within the interface.
+// Otherwise, If the values have different types, Equal will report false.
+// Otherwise, for arrays and structs Equal will compare each element in order,
+// and report false if it finds non-equal elements.
+// During all comparisons, if values of the same type are compared,
+// and the type is not comparable, Equal will panic.
 func (v Value) Equal(u Value) bool {
+	if v.Kind() == Interface {
+		v = v.Elem()
+	}
+	if u.Kind() == Interface {
+		u = u.Elem()
+	}
+
 	if !v.IsValid() || !u.IsValid() {
 		return v.IsValid() == u.IsValid()
 	}
 
-	if v.Comparable() || u.Comparable() {
-		return valueInterface(v, false) == valueInterface(u, false)
+	if v.Kind() != u.Kind() || v.Type() != u.Type() {
+		return false
 	}
 
-	if u.Kind() == Interface && v.kind() == Interface { // this case is for nil interface value
-		return v.Elem().Equal(u.Elem())
+	// Handle each Kind directly rather than calling valueInterface
+	// to avoid allocating.
+	switch v.Kind() {
+	default:
+		panic("reflect.Value.Equal: invalid Kind")
+	case Bool:
+		return v.Bool() == u.Bool()
+	case Int, Int8, Int16, Int32, Int64:
+		return v.Int() == u.Int()
+	case Uint, Uint8, Uint16, Uint32, Uint64, Uintptr:
+		return v.Uint() == u.Uint()
+	case Float32, Float64:
+		return v.Float() == u.Float()
+	case Complex64, Complex128:
+		return v.Complex() == u.Complex()
+	case String:
+		return v.String() == u.String()
+	case Chan, Pointer, UnsafePointer:
+		return v.Pointer() == u.Pointer()
+	case Array:
+		// u and v have the same type so they have the same length
+		vl := v.Len()
+		if vl == 0 {
+			// panic on [0]func()
+			if !v.Type().Elem().Comparable() {
+				break
+			}
+			return true
+		}
+		for i := 0; i < vl; i++ {
+			if !v.Index(i).Equal(u.Index(i)) {
+				return false
+			}
+		}
+		return true
+	case Struct:
+		// u and v have the same type so they have the same fields
+		nf := v.NumField()
+		for i := 0; i < nf; i++ {
+			if !v.Field(i).Equal(u.Field(i)) {
+				return false
+			}
+		}
+		return true
+	case Func, Map, Slice:
+		break
 	}
-
-	return false
+	panic("reflect.Value.Equal: values of type " + v.Type().String() + " are not comparable")
 }
 
 // convertOp returns the function to convert a value of type src
@@ -3380,7 +3474,7 @@ func convertOp(dst, src *rtype) func(Value, Type) Value {
 		if dst.Kind() == Pointer && dst.Elem().Kind() == Array && src.Elem() == dst.Elem().Elem() {
 			return cvtSliceArrayPtr
 		}
-		// "x is a slice, T is a array type,
+		// "x is a slice, T is an array type,
 		// and the slice and array types have identical element types."
 		if dst.Kind() == Array && src.Elem() == dst.Elem() {
 			return cvtSliceArray
@@ -3446,7 +3540,7 @@ func makeFloat(f flag, v float64, t Type) Value {
 	return Value{typ, ptr, f | flagIndir | flag(typ.Kind())}
 }
 
-// makeFloat returns a Value of type t equal to v, where t is a float32 type.
+// makeFloat32 returns a Value of type t equal to v, where t is a float32 type.
 func makeFloat32(f flag, v float32, t Type) Value {
 	typ := t.common()
 	ptr := unsafe_New(typ)
@@ -3696,6 +3790,8 @@ func mapiternext(it *hiter)
 //go:noescape
 func maplen(m unsafe.Pointer) int
 
+func mapclear(t *rtype, m unsafe.Pointer)
+
 // call calls fn with "stackArgsSize" bytes of stack arguments laid out
 // at stackArgs and register arguments laid out in regArgs. frameSize is
 // the total amount of stack space that will be reserved by call, so this
@@ -3736,12 +3832,6 @@ func memmove(dst, src unsafe.Pointer, size uintptr)
 //go:noescape
 func typedmemmove(t *rtype, dst, src unsafe.Pointer)
 
-// typedmemmovepartial is like typedmemmove but assumes that
-// dst and src point off bytes into the value and only copies size bytes.
-//
-//go:noescape
-func typedmemmovepartial(t *rtype, dst, src unsafe.Pointer, off, size uintptr)
-
 // typedmemclr zeros the value at ptr of type t.
 //
 //go:noescape
@@ -3759,10 +3849,19 @@ func typedmemclrpartial(t *rtype, ptr unsafe.Pointer, off, size uintptr)
 //go:noescape
 func typedslicecopy(elemType *rtype, dst, src unsafeheader.Slice) int
 
+// typedarrayclear zeroes the value at ptr of an array of elemType,
+// only clears len elem.
+//
+//go:noescape
+func typedarrayclear(elemType *rtype, ptr unsafe.Pointer, len int)
+
 //go:noescape
 func typehash(t *rtype, p unsafe.Pointer, h uintptr) uintptr
 
 func verifyNotInHeapPtr(p uintptr) bool
+
+//go:noescape
+func growslice(t *rtype, old unsafeheader.Slice, num int) unsafeheader.Slice
 
 // Dummy annotation marking that the value x escapes,
 // for use in cases where the reflect code is so clever that

@@ -233,12 +233,9 @@ func processFile(filename string, info fs.FileInfo, in io.Reader, r *reporter) e
 	}
 
 	fileSet := token.NewFileSet()
-	fragmentOk := false
-	if info == nil {
-		// If we are formatting stdin, we accept a program fragment in lieu of a
-		// complete source file.
-		fragmentOk = true
-	}
+	// If we are formatting stdin, we accept a program fragment in lieu of a
+	// complete source file.
+	fragmentOk := info == nil
 	file, sourceAdj, indentAdj, err := parse(fileSet, filename, src, fragmentOk)
 	if err != nil {
 		return err
@@ -470,8 +467,6 @@ func fileWeight(path string, info fs.FileInfo) int64 {
 	return info.Size()
 }
 
-const chmodSupported = runtime.GOOS != "windows"
-
 // backupFile writes data to a new file named filename<number> with permissions perm,
 // with <number randomly chosen such that the file name is unique. backupFile returns
 // the chosen file name.
@@ -485,13 +480,11 @@ func backupFile(filename string, data []byte, perm fs.FileMode) (string, error) 
 		return "", err
 	}
 	bakname := f.Name()
-	if chmodSupported {
-		err = f.Chmod(perm)
-		if err != nil {
-			f.Close()
-			os.Remove(bakname)
-			return bakname, err
-		}
+	err = f.Chmod(perm)
+	if err != nil {
+		f.Close()
+		os.Remove(bakname)
+		return bakname, err
 	}
 
 	// write data to backup file

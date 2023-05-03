@@ -144,6 +144,10 @@ type mheap struct {
 	// will never be nil.
 	arenas [1 << arenaL1Bits]*[1 << arenaL2Bits]*heapArena
 
+	// arenasHugePages indicates whether arenas' L2 entries are eligible
+	// to be backed by huge pages.
+	arenasHugePages bool
+
 	// heapArenaAlloc is pre-reserved space for allocating heapArena
 	// objects. This is only used on 32-bit, where we pre-reserve
 	// this space to avoid interleaving it with the heap itself.
@@ -202,6 +206,25 @@ type mheap struct {
 	specialReachableAlloc fixalloc // allocator for specialReachable
 	speciallock           mutex    // lock for special record allocators.
 	arenaHintAlloc        fixalloc // allocator for arenaHints
+
+	// User arena state.
+	//
+	// Protected by mheap_.lock.
+	userArena struct {
+		// arenaHints is a list of addresses at which to attempt to
+		// add more heap arenas for user arena chunks. This is initially
+		// populated with a set of general hint addresses, and grown with
+		// the bounds of actual heap arena ranges.
+		arenaHints *arenaHint
+
+		// quarantineList is a list of user arena spans that have been set to fault, but
+		// are waiting for all pointers into them to go away. Sweeping handles
+		// identifying when this is true, and moves the span to the ready list.
+		quarantineList mSpanList
+
+		// readyList is a list of empty user arena spans that are ready for reuse.
+		readyList mSpanList
+	}
 
 	unused *specialfinalizer // never set, just here to force the specialfinalizer type into DWARF
 }
@@ -352,7 +375,6 @@ var mSpanStateNames = []string{
 	"mSpanDead",
 	"mSpanInUse",
 	"mSpanManual",
-	"mSpanFree",
 }
 
 // mSpanStateBox holds an atomic.Uint8 to provide atomic operations on
@@ -462,11 +484,21 @@ type mspan struct {
 	spanclass             spanClass     // size class and noscan (uint8)
 	state                 mSpanStateBox // mSpanInUse etc; accessed atomically (get/set methods)
 	needzero              uint8         // needs to be zeroed before allocation
+	isUserArenaChunk      bool          // whether or not this span represents a user arena
 	allocCountBeforeCache uint16        // a copy of allocCount that is stored just before this span is cached
 	elemsize              uintptr       // computed from sizeclass or from npages
 	limit                 uintptr       // end of data in span
 	speciallock           mutex         // guards specials list
 	specials              *special      // linked list of special records sorted by offset.
+	userArenaChunkFree    addrRange     // interval for managing chunk allocation
+
+	// freeIndexForScan is like freeindex, except that freeindex is
+	// used by the allocator whereas freeIndexForScan is used by the
+	// GC scanner. They are two fields so that the GC sees the object
+	// is allocated only when the object and the heap bits are
+	// initialized (see also the assignment of freeIndexForScan in
+	// mallocgc, and issue 54596).
+	freeIndexForScan uintptr
 }
 
 func (s *mspan) base() uintptr {
@@ -576,6 +608,12 @@ func arenaBase(i arenaIdx) uintptr {
 
 type arenaIdx uint
 
+// l1 returns the "l1" portion of an arenaIdx.
+//
+// Marked nosplit because it's called by spanOf and other nosplit
+// functions.
+//
+//go:nosplit
 func (i arenaIdx) l1() uint {
 	if arenaL1Bits == 0 {
 		// Let the compiler optimize this away if there's no
@@ -586,6 +624,12 @@ func (i arenaIdx) l1() uint {
 	}
 }
 
+// l2 returns the "l2" portion of an arenaIdx.
+//
+// Marked nosplit because it's called by spanOf and other nosplit funcs.
+// functions.
+//
+//go:nosplit
 func (i arenaIdx) l2() uint {
 	if arenaL1Bits == 0 {
 		return uint(i)
@@ -729,7 +773,7 @@ func (h *mheap) init() {
 		h.central[i].mcentral.init(spanClass(i))
 	}
 
-	h.pages.init(&h.lock, &memstats.gcMiscSys)
+	h.pages.init(&h.lock, &memstats.gcMiscSys, false)
 }
 
 // reclaim sweeps and reclaims at least npage pages into the heap.
@@ -1194,6 +1238,7 @@ func (h *mheap) allocSpan(npages uintptr, typ spanAllocType, spanclass spanClass
 		base = alignUp(base, physPageSize)
 		scav = h.pages.allocRange(base, npages)
 	}
+
 	if base == 0 {
 		// Try to acquire a base address.
 		base, scav = h.pages.alloc(npages)
@@ -1218,6 +1263,117 @@ func (h *mheap) allocSpan(npages uintptr, typ spanAllocType, spanclass spanClass
 	unlock(&h.lock)
 
 HaveSpan:
+	// Decide if we need to scavenge in response to what we just allocated.
+	// Specifically, we track the maximum amount of memory to scavenge of all
+	// the alternatives below, assuming that the maximum satisfies *all*
+	// conditions we check (e.g. if we need to scavenge X to satisfy the
+	// memory limit and Y to satisfy heap-growth scavenging, and Y > X, then
+	// it's fine to pick Y, because the memory limit is still satisfied).
+	//
+	// It's fine to do this after allocating because we expect any scavenged
+	// pages not to get touched until we return. Simultaneously, it's important
+	// to do this before calling sysUsed because that may commit address space.
+	bytesToScavenge := uintptr(0)
+	forceScavenge := false
+	if limit := gcController.memoryLimit.Load(); !gcCPULimiter.limiting() {
+		// Assist with scavenging to maintain the memory limit by the amount
+		// that we expect to page in.
+		inuse := gcController.mappedReady.Load()
+		// Be careful about overflow, especially with uintptrs. Even on 32-bit platforms
+		// someone can set a really big memory limit that isn't maxInt64.
+		if uint64(scav)+inuse > uint64(limit) {
+			bytesToScavenge = uintptr(uint64(scav) + inuse - uint64(limit))
+			forceScavenge = true
+		}
+	}
+	if goal := scavenge.gcPercentGoal.Load(); goal != ^uint64(0) && growth > 0 {
+		// We just caused a heap growth, so scavenge down what will soon be used.
+		// By scavenging inline we deal with the failure to allocate out of
+		// memory fragments by scavenging the memory fragments that are least
+		// likely to be re-used.
+		//
+		// Only bother with this because we're not using a memory limit. We don't
+		// care about heap growths as long as we're under the memory limit, and the
+		// previous check for scaving already handles that.
+		if retained := heapRetained(); retained+uint64(growth) > goal {
+			// The scavenging algorithm requires the heap lock to be dropped so it
+			// can acquire it only sparingly. This is a potentially expensive operation
+			// so it frees up other goroutines to allocate in the meanwhile. In fact,
+			// they can make use of the growth we just created.
+			todo := growth
+			if overage := uintptr(retained + uint64(growth) - goal); todo > overage {
+				todo = overage
+			}
+			if todo > bytesToScavenge {
+				bytesToScavenge = todo
+			}
+		}
+	}
+	// There are a few very limited circumstances where we won't have a P here.
+	// It's OK to simply skip scavenging in these cases. Something else will notice
+	// and pick up the tab.
+	var now int64
+	if pp != nil && bytesToScavenge > 0 {
+		// Measure how long we spent scavenging and add that measurement to the assist
+		// time so we can track it for the GC CPU limiter.
+		//
+		// Limiter event tracking might be disabled if we end up here
+		// while on a mark worker.
+		start := nanotime()
+		track := pp.limiterEvent.start(limiterEventScavengeAssist, start)
+
+		// Scavenge, but back out if the limiter turns on.
+		h.pages.scavenge(bytesToScavenge, func() bool {
+			return gcCPULimiter.limiting()
+		}, forceScavenge)
+
+		// Finish up accounting.
+		now = nanotime()
+		if track {
+			pp.limiterEvent.stop(limiterEventScavengeAssist, now)
+		}
+		scavenge.assistTime.Add(now - start)
+	}
+
+	// Initialize the span.
+	h.initSpan(s, typ, spanclass, base, npages)
+
+	// Commit and account for any scavenged memory that the span now owns.
+	nbytes := npages * pageSize
+	if scav != 0 {
+		// sysUsed all the pages that are actually available
+		// in the span since some of them might be scavenged.
+		sysUsed(unsafe.Pointer(base), nbytes, scav)
+		gcController.heapReleased.add(-int64(scav))
+	}
+	// Update stats.
+	gcController.heapFree.add(-int64(nbytes - scav))
+	if typ == spanAllocHeap {
+		gcController.heapInUse.add(int64(nbytes))
+	}
+	// Update consistent stats.
+	stats := memstats.heapStats.acquire()
+	atomic.Xaddint64(&stats.committed, int64(scav))
+	atomic.Xaddint64(&stats.released, -int64(scav))
+	switch typ {
+	case spanAllocHeap:
+		atomic.Xaddint64(&stats.inHeap, int64(nbytes))
+	case spanAllocStack:
+		atomic.Xaddint64(&stats.inStacks, int64(nbytes))
+	case spanAllocPtrScalarBits:
+		atomic.Xaddint64(&stats.inPtrScalarBits, int64(nbytes))
+	case spanAllocWorkBuf:
+		atomic.Xaddint64(&stats.inWorkBufs, int64(nbytes))
+	}
+	memstats.heapStats.release()
+
+	pageTraceAlloc(pp, now, base, npages)
+	return s
+}
+
+// initSpan initializes a blank span s which will represent the range
+// [base, base+npages*pageSize). typ is the type of span being allocated.
+func (h *mheap) initSpan(s *mspan, typ spanAllocType, spanclass spanClass, base, npages uintptr) {
 	// At this point, both s != nil and base != 0, and the heap
 	// lock is no longer held. Initialize the span.
 	s.init(base, npages)
@@ -1246,6 +1402,7 @@ HaveSpan:
 
 		// Initialize mark and allocation structures.
 		s.freeindex = 0
+		s.freeIndexForScan = 0
 		s.allocCache = ^uint64(0) // all 1s indicating all free.
 		s.gcmarkBits = newMarkBits(s.nelems)
 		s.allocBits = newAllocBits(s.nelems)
@@ -1267,103 +1424,6 @@ HaveSpan:
 		// any situation where a pointer is suspect.
 		s.state.set(mSpanInUse)
 	}
-
-	// Decide if we need to scavenge in response to what we just allocated.
-	// Specifically, we track the maximum amount of memory to scavenge of all
-	// the alternatives below, assuming that the maximum satisfies *all*
-	// conditions we check (e.g. if we need to scavenge X to satisfy the
-	// memory limit and Y to satisfy heap-growth scavenging, and Y > X, then
-	// it's fine to pick Y, because the memory limit is still satisfied).
-	//
-	// It's fine to do this after allocating because we expect any scavenged
-	// pages not to get touched until we return. Simultaneously, it's important
-	// to do this before calling sysUsed because that may commit address space.
-	bytesToScavenge := uintptr(0)
-	if limit := gcController.memoryLimit.Load(); go119MemoryLimitSupport && !gcCPULimiter.limiting() {
-		// Assist with scavenging to maintain the memory limit by the amount
-		// that we expect to page in.
-		inuse := gcController.mappedReady.Load()
-		// Be careful about overflow, especially with uintptrs. Even on 32-bit platforms
-		// someone can set a really big memory limit that isn't maxInt64.
-		if uint64(scav)+inuse > uint64(limit) {
-			bytesToScavenge = uintptr(uint64(scav) + inuse - uint64(limit))
-		}
-	}
-	if goal := scavenge.gcPercentGoal.Load(); goal != ^uint64(0) && growth > 0 {
-		// We just caused a heap growth, so scavenge down what will soon be used.
-		// By scavenging inline we deal with the failure to allocate out of
-		// memory fragments by scavenging the memory fragments that are least
-		// likely to be re-used.
-		//
-		// Only bother with this because we're not using a memory limit. We don't
-		// care about heap growths as long as we're under the memory limit, and the
-		// previous check for scaving already handles that.
-		if retained := heapRetained(); retained+uint64(growth) > goal {
-			// The scavenging algorithm requires the heap lock to be dropped so it
-			// can acquire it only sparingly. This is a potentially expensive operation
-			// so it frees up other goroutines to allocate in the meanwhile. In fact,
-			// they can make use of the growth we just created.
-			todo := growth
-			if overage := uintptr(retained + uint64(growth) - goal); todo > overage {
-				todo = overage
-			}
-			if todo > bytesToScavenge {
-				bytesToScavenge = todo
-			}
-		}
-	}
-	// There are a few very limited cirumstances where we won't have a P here.
-	// It's OK to simply skip scavenging in these cases. Something else will notice
-	// and pick up the tab.
-	if pp != nil && bytesToScavenge > 0 {
-		// Measure how long we spent scavenging and add that measurement to the assist
-		// time so we can track it for the GC CPU limiter.
-		//
-		// Limiter event tracking might be disabled if we end up here
-		// while on a mark worker.
-		start := nanotime()
-		track := pp.limiterEvent.start(limiterEventScavengeAssist, start)
-
-		// Scavenge, but back out if the limiter turns on.
-		h.pages.scavenge(bytesToScavenge, func() bool {
-			return gcCPULimiter.limiting()
-		})
-
-		// Finish up accounting.
-		now := nanotime()
-		if track {
-			pp.limiterEvent.stop(limiterEventScavengeAssist, now)
-		}
-		scavenge.assistTime.Add(now - start)
-	}
-
-	// Commit and account for any scavenged memory that the span now owns.
-	if scav != 0 {
-		// sysUsed all the pages that are actually available
-		// in the span since some of them might be scavenged.
-		sysUsed(unsafe.Pointer(base), nbytes, scav)
-		gcController.heapReleased.add(-int64(scav))
-	}
-	// Update stats.
-	gcController.heapFree.add(-int64(nbytes - scav))
-	if typ == spanAllocHeap {
-		gcController.heapInUse.add(int64(nbytes))
-	}
-	// Update consistent stats.
-	stats := memstats.heapStats.acquire()
-	atomic.Xaddint64(&stats.committed, int64(scav))
-	atomic.Xaddint64(&stats.released, -int64(scav))
-	switch typ {
-	case spanAllocHeap:
-		atomic.Xaddint64(&stats.inHeap, int64(nbytes))
-	case spanAllocStack:
-		atomic.Xaddint64(&stats.inStacks, int64(nbytes))
-	case spanAllocPtrScalarBits:
-		atomic.Xaddint64(&stats.inPtrScalarBits, int64(nbytes))
-	case spanAllocWorkBuf:
-		atomic.Xaddint64(&stats.inWorkBufs, int64(nbytes))
-	}
-	memstats.heapStats.release()
 
 	// Publish the span in various locations.
 
@@ -1390,8 +1450,6 @@ HaveSpan:
 	// Make sure the newly allocated span will be observed
 	// by the GC before pointers into the span are published.
 	publicationBarrier()
-
-	return s
 }
 
 // Try to add at least npage pages of memory to the heap,
@@ -1417,7 +1475,7 @@ func (h *mheap) grow(npage uintptr) (uintptr, bool) {
 		// Not enough room in the current arena. Allocate more
 		// arena space. This may not be contiguous with the
 		// current arena, so we have to request the full ask.
-		av, asize := h.sysAlloc(ask)
+		av, asize := h.sysAlloc(ask, &h.arenaHints, true)
 		if av == nil {
 			inUse := gcController.heapFree.load() + gcController.heapReleased.load() + gcController.heapInUse.load()
 			print("runtime: out of memory: cannot allocate ", ask, "-byte block (", inUse, " in use)\n")
@@ -1485,6 +1543,8 @@ func (h *mheap) grow(npage uintptr) (uintptr, bool) {
 // Free the span back into the heap.
 func (h *mheap) freeSpan(s *mspan) {
 	systemstack(func() {
+		pageTraceFree(getg().m.p.ptr(), 0, s.base(), s.npages)
+
 		lock(&h.lock)
 		if msanenabled {
 			// Tell msan that this entire span is no longer in use.
@@ -1515,6 +1575,8 @@ func (h *mheap) freeSpan(s *mspan) {
 //
 //go:systemstack
 func (h *mheap) freeManual(s *mspan, typ spanAllocType) {
+	pageTraceFree(getg().m.p.ptr(), 0, s.base(), s.npages)
+
 	s.needzero = 1
 	lock(&h.lock)
 	h.freeSpanLocked(s, typ)
@@ -1530,6 +1592,9 @@ func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType) {
 			throw("mheap.freeSpanLocked - invalid stack free")
 		}
 	case mSpanInUse:
+		if s.isUserArenaChunk {
+			throw("mheap.freeSpanLocked - invalid free of user arena chunk")
+		}
 		if s.allocCount != 0 || s.sweepgen != h.sweepgen {
 			print("mheap.freeSpanLocked - span ", s, " ptr ", hex(s.base()), " allocCount ", s.allocCount, " sweepgen ", s.sweepgen, "/", h.sweepgen, "\n")
 			throw("mheap.freeSpanLocked - invalid free")
@@ -1566,7 +1631,7 @@ func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType) {
 	memstats.heapStats.release()
 
 	// Mark the space as free.
-	h.pages.free(s.base(), s.npages, false)
+	h.pages.free(s.base(), s.npages)
 
 	// Free the span structure. We no longer have a use for it.
 	s.state.set(mSpanDead)
@@ -1576,6 +1641,10 @@ func (h *mheap) freeSpanLocked(s *mspan, typ spanAllocType) {
 // scavengeAll acquires the heap lock (blocking any additional
 // manipulation of the page allocator) and iterates over the whole
 // heap, scavenging every free page available.
+//
+// Must run on the system stack because it acquires the heap lock.
+//
+//go:systemstack
 func (h *mheap) scavengeAll() {
 	// Disallow malloc or panic while holding the heap lock. We do
 	// this here because this is a non-mallocgc entry-point to
@@ -1583,7 +1652,8 @@ func (h *mheap) scavengeAll() {
 	gp := getg()
 	gp.m.mallocing++
 
-	released := h.pages.scavenge(^uintptr(0), nil)
+	// Force scavenge everything.
+	released := h.pages.scavenge(^uintptr(0), nil, true)
 
 	gp.m.mallocing--
 
@@ -1613,6 +1683,7 @@ func (span *mspan) init(base uintptr, npages uintptr) {
 	span.specials = nil
 	span.needzero = 0
 	span.freeindex = 0
+	span.freeIndexForScan = 0
 	span.allocBits = nil
 	span.gcmarkBits = nil
 	span.state.set(mSpanDead)

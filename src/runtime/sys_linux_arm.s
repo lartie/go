@@ -117,7 +117,7 @@ TEXT exit1<>(SB),NOSPLIT|NOFRAME,$0
 	MOVW	$1003, R1
 	MOVW	R0, (R1)	// fail hard
 
-// func exitThread(wait *uint32)
+// func exitThread(wait *atomic.Uint32)
 TEXT runtime·exitThread(SB),NOSPLIT|NOFRAME,$0-4
 	MOVW	wait+0(FP), R0
 	// We're done using the stack.
@@ -649,7 +649,4 @@ TEXT runtime·sbrk0(SB),NOSPLIT,$0-4
 	MOVW	$SYS_brk, R7
 	SWI	$0
 	MOVW	R0, ret+0(FP)
-	RET
-
-TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
 	RET

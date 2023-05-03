@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,24 +47,17 @@ func (notExistError) Is(err error) bool { return err == fs.ErrNotExist }
 
 const gitWorkDirType = "git3"
 
-var gitRepoCache par.Cache
+var gitRepoCache par.ErrCache[gitCacheKey, Repo]
+
+type gitCacheKey struct {
+	remote  string
+	localOK bool
+}
 
 func newGitRepoCached(remote string, localOK bool) (Repo, error) {
-	type key struct {
-		remote  string
-		localOK bool
-	}
-	type cached struct {
-		repo Repo
-		err  error
-	}
-
-	c := gitRepoCache.Do(key{remote, localOK}, func() any {
-		repo, err := newGitRepo(remote, localOK)
-		return cached{repo, err}
-	}).(cached)
-
-	return c.repo, c.err
+	return gitRepoCache.Do(gitCacheKey{remote, localOK}, func() (Repo, error) {
+		return newGitRepo(remote, localOK)
+	})
 }
 
 func newGitRepo(remote string, localOK bool) (Repo, error) {
@@ -94,6 +88,21 @@ func newGitRepo(remote string, localOK bool) (Repo, error) {
 			if _, err := Run(r.dir, "git", "remote", "add", "origin", "--", r.remote); err != nil {
 				os.RemoveAll(r.dir)
 				return nil, err
+			}
+			if runtime.GOOS == "windows" {
+				// Git for Windows by default does not support paths longer than
+				// MAX_PATH (260 characters) because that may interfere with navigation
+				// in some Windows programs. However, cmd/go should be able to handle
+				// long paths just fine, and we expect people to use 'go clean' to
+				// manipulate the module cache, so it should be harmless to set here,
+				// and in some cases may be necessary in order to download modules with
+				// long branch names.
+				//
+				// See https://github.com/git-for-windows/git/wiki/Git-cannot-create-a-file-or-directory-with-a-long-path.
+				if _, err := Run(r.dir, "git", "config", "core.longpaths", "true"); err != nil {
+					os.RemoveAll(r.dir)
+					return nil, err
+				}
 			}
 		}
 		r.remoteURL = r.remote
@@ -132,7 +141,7 @@ type gitRepo struct {
 
 	fetchLevel int
 
-	statCache par.Cache
+	statCache par.ErrCache[string, *RevInfo]
 
 	refsOnce sync.Once
 	// refs maps branch and tag refs (e.g., "HEAD", "refs/heads/master")
@@ -637,15 +646,9 @@ func (r *gitRepo) Stat(rev string) (*RevInfo, error) {
 	if rev == "latest" {
 		return r.Latest()
 	}
-	type cached struct {
-		info *RevInfo
-		err  error
-	}
-	c := r.statCache.Do(rev, func() any {
-		info, err := r.stat(rev)
-		return cached{info, err}
-	}).(cached)
-	return c.info, c.err
+	return r.statCache.Do(rev, func() (*RevInfo, error) {
+		return r.stat(rev)
+	})
 }
 
 func (r *gitRepo) ReadFile(rev, file string, maxSize int64) ([]byte, error) {

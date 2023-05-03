@@ -5,8 +5,10 @@
 package runtime
 
 import (
+	"internal/abi"
 	"internal/goarch"
 	"runtime/internal/atomic"
+	"runtime/internal/sys"
 	"unsafe"
 )
 
@@ -270,6 +272,11 @@ func (gp *guintptr) cas(old, new guintptr) bool {
 	return atomic.Casuintptr((*uintptr)(unsafe.Pointer(gp)), uintptr(old), uintptr(new))
 }
 
+//go:nosplit
+func (gp *g) guintptr() guintptr {
+	return guintptr(unsafe.Pointer(gp))
+}
+
 // setGNoWB performs *gp = new without a write barrier.
 // For times when it's impractical to use a guintptr.
 //
@@ -479,6 +486,7 @@ type g struct {
 	sigcode0       uintptr
 	sigcode1       uintptr
 	sigpc          uintptr
+	parentGoid     uint64          // goid of goroutine that created this goroutine
 	gopc           uintptr         // pc of go statement that created this goroutine
 	ancestors      *[]ancestorInfo // ancestor information goroutine(s) that created this goroutine (only used if debug.tracebackancestors)
 	startpc        uintptr         // pc of goroutine function
@@ -516,6 +524,13 @@ const (
 	tlsSize  = tlsSlots * goarch.PtrSize
 )
 
+// Values for m.freeWait.
+const (
+	freeMStack = 0 // M done, free stack and reference.
+	freeMRef   = 1 // M done, free reference.
+	freeMWait  = 2 // M still in use.
+)
+
 type m struct {
 	g0      *g     // goroutine with scheduling stack
 	morebuf gobuf  // gobuf arg to morestack
@@ -545,9 +560,10 @@ type m struct {
 	blocked       bool // m is blocked on a note
 	newSigstack   bool // minit on C thread called sigaltstack
 	printlock     int8
-	incgo         bool   // m is executing a cgo call
-	isextra       bool   // m is an extra m
-	freeWait      uint32 // if == 0, safe to free g0 and delete m (atomic)
+	incgo         bool          // m is executing a cgo call
+	isextra       bool          // m is an extra m
+	isExtraInC    bool          // m is an extra m that is not executing Go code
+	freeWait      atomic.Uint32 // Whether it is safe to free g0 and delete m (one of freeMRef, freeMStack, freeMWait)
 	fastrand      uint64
 	needextram    bool
 	traceback     uint8
@@ -747,6 +763,11 @@ type p struct {
 	// scheduler ASAP (regardless of what G is running on it).
 	preempt bool
 
+	// pageTraceBuf is a buffer for writing out page allocation/free/scavenge traces.
+	//
+	// Used only if GOEXPERIMENT=pagetrace.
+	pageTraceBuf pageTraceBuf
+
 	// Padding is no longer needed. False sharing is now not a worry because p is large enough
 	// that its size class is an integer multiple of the cache line size (for any of our architectures).
 }
@@ -868,6 +889,8 @@ const (
 // Keep in sync with linker (../cmd/link/internal/ld/pcln.go:/pclntab)
 // and with package debug/gosym and with symtab.go in package runtime.
 type _func struct {
+	sys.NotInHeap // Only in static data
+
 	entryOff uint32 // start pc, as offset from moduledata.text/pcHeader.textStart
 	nameOff  int32  // function name, as index into moduledata.funcnametab.
 
@@ -878,9 +901,10 @@ type _func struct {
 	pcfile    uint32
 	pcln      uint32
 	npcdata   uint32
-	cuOffset  uint32 // runtime.cutab offset of this function's CU
-	funcID    funcID // set for certain special runtime functions
-	flag      funcFlag
+	cuOffset  uint32     // runtime.cutab offset of this function's CU
+	startLine int32      // line number of start of function (func keyword/TEXT directive)
+	funcID    abi.FuncID // set for certain special runtime functions
+	flag      abi.FuncFlag
 	_         [1]byte // pad
 	nfuncdata uint8   // must be last, must end on a uint32-aligned boundary
 
@@ -910,12 +934,15 @@ type _func struct {
 // Pseudo-Func that is returned for PCs that occur in inlined code.
 // A *Func can be either a *_func or a *funcinl, and they are distinguished
 // by the first uintptr.
+//
+// TODO(austin): Can we merge this with inlinedCall?
 type funcinl struct {
-	ones  uint32  // set to ^0 to distinguish from _func
-	entry uintptr // entry of the real (the "outermost") frame
-	name  string
-	file  string
-	line  int
+	ones      uint32  // set to ^0 to distinguish from _func
+	entry     uintptr // entry of the real (the "outermost") frame
+	name      string
+	file      string
+	line      int32
+	startLine int32
 }
 
 // layout of Itab known to compilers
@@ -1023,15 +1050,6 @@ type ancestorInfo struct {
 	goid uint64    // goroutine id of this goroutine; original goroutine possibly dead
 	gopc uintptr   // pc of go statement that created this goroutine
 }
-
-const (
-	_TraceRuntimeFrames = 1 << iota // include frames for internal runtime functions.
-	_TraceTrap                      // the initial PC, SP are from a trap, not a return PC from a call
-	_TraceJumpStack                 // if traceback is on a systemstack, resume trace at g that called into it
-)
-
-// The maximum number of frames we print for a traceback
-const _TracebackMaxFrames = 100
 
 // A waitReason explains why a goroutine has been stopped.
 // See gopark. Do not re-use waitReasons, add new ones.

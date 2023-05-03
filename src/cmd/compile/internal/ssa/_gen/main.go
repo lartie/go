@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"go/format"
 	"log"
+	"math/bits"
 	"os"
 	"path"
 	"regexp"
@@ -58,6 +59,7 @@ type opData struct {
 	resultInArg0      bool   // (first, if a tuple) output of v and v.Args[0] must be allocated to the same register
 	resultNotInArgs   bool   // outputs must not be allocated to the same registers as inputs
 	clobberFlags      bool   // this op clobbers flags register
+	needIntTemp       bool   // need a temporary free integer register
 	call              bool   // is a function call
 	tailCall          bool   // is a tail call
 	nilCheck          bool   // this op is a nil check on arg0
@@ -153,6 +155,7 @@ func main() {
 
 	tasks := []func(){
 		genOp,
+		genAllocators,
 	}
 	for _, a := range archs {
 		a := a // the funcs are ran concurrently at a later time
@@ -188,7 +191,7 @@ func main() {
 
 func genOp() {
 	w := new(bytes.Buffer)
-	fmt.Fprintf(w, "// Code generated from gen/*Ops.go; DO NOT EDIT.\n")
+	fmt.Fprintf(w, "// Code generated from _gen/*Ops.go using 'go generate'; DO NOT EDIT.\n")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "package ssa")
 
@@ -301,6 +304,9 @@ func genOp() {
 			}
 			if v.clobberFlags {
 				fmt.Fprintln(w, "clobberFlags: true,")
+			}
+			if v.needIntTemp {
+				fmt.Fprintln(w, "needIntTemp: true,")
 			}
 			if v.call {
 				fmt.Fprintln(w, "call: true,")
@@ -545,12 +551,7 @@ func (a arch) Name() string {
 
 // countRegs returns the number of set bits in the register mask.
 func countRegs(r regMask) int {
-	n := 0
-	for r != 0 {
-		n += int(r & 1)
-		r >>= 1
-	}
-	return n
+	return bits.OnesCount64(uint64(r))
 }
 
 // for sorting a pair of integers by key

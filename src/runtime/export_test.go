@@ -47,6 +47,9 @@ var NetpollGenericInit = netpollGenericInit
 var Memmove = memmove
 var MemclrNoHeapPointers = memclrNoHeapPointers
 
+const TracebackInnerFrames = tracebackInnerFrames
+const TracebackOuterFrames = tracebackOuterFrames
+
 var LockPartialOrder = lockPartialOrder
 
 type LockRank lockRank
@@ -68,6 +71,9 @@ func LFStackPush(head *uint64, node *LFNode) {
 
 func LFStackPop(head *uint64) *LFNode {
 	return (*LFNode)(unsafe.Pointer((*lfstack)(head).pop()))
+}
+func LFNodeValidate(node *LFNode) {
+	lfnodeValidate((*lfnode)(unsafe.Pointer(node)))
 }
 
 func Netpoll(delta int64) {
@@ -362,6 +368,9 @@ func ReadMemStatsSlow() (base, slow MemStats) {
 			if s.state.get() != mSpanInUse {
 				continue
 			}
+			if s.isUnusedUserArenaChunk() {
+				continue
+			}
 			if sizeclass := s.spanclass.sizeclass(); sizeclass == 0 {
 				slow.Mallocs++
 				slow.Alloc += uint64(s.elemsize)
@@ -477,7 +486,9 @@ func LockOSCounts() (external, internal uint32) {
 func TracebackSystemstack(stk []uintptr, i int) int {
 	if i == 0 {
 		pc, sp := getcallerpc(), getcallersp()
-		return gentraceback(pc, sp, 0, getg(), 0, &stk[0], len(stk), nil, nil, _TraceJumpStack)
+		var u unwinder
+		u.initAt(pc, sp, 0, getg(), unwindJumpStack) // Don't ignore errors, for testing
+		return tracebackPCs(&u, 0, stk)
 	}
 	n := 0
 	systemstack(func() {
@@ -500,7 +511,10 @@ func KeepNArenaHints(n int) {
 // MapNextArenaHint reserves a page at the next arena growth hint,
 // preventing the arena from growing there, and returns the range of
 // addresses that are no longer viable.
-func MapNextArenaHint() (start, end uintptr) {
+//
+// This may fail to reserve memory. If it fails, it still returns the
+// address range it attempted to reserve.
+func MapNextArenaHint() (start, end uintptr, ok bool) {
 	hint := mheap_.arenaHints
 	addr := hint.addr
 	if hint.down {
@@ -509,7 +523,13 @@ func MapNextArenaHint() (start, end uintptr) {
 	} else {
 		start, end = addr, addr+heapArenaBytes
 	}
-	sysReserve(unsafe.Pointer(addr), physPageSize)
+	got := sysReserve(unsafe.Pointer(addr), physPageSize)
+	ok = (addr == uintptr(got))
+	if !ok {
+		// We were unable to get the requested reservation.
+		// Release what we did get and fail.
+		sysFreeOS(got, physPageSize)
+	}
 	return
 }
 
@@ -523,6 +543,10 @@ type Sudog = sudog
 
 func Getg() *G {
 	return getg()
+}
+
+func Goid() uint64 {
+	return getg().goid
 }
 
 func GIsWaitingOnMutex(gp *G) bool {
@@ -807,7 +831,7 @@ func (p *PageAlloc) Free(base, npages uintptr) {
 		// None of the tests need any higher-level locking, so we just
 		// take the lock internally.
 		lock(pp.mheapLock)
-		pp.free(base, npages, true)
+		pp.free(base, npages)
 		unlock(pp.mheapLock)
 	})
 }
@@ -817,7 +841,7 @@ func (p *PageAlloc) Bounds() (ChunkIdx, ChunkIdx) {
 func (p *PageAlloc) Scavenge(nbytes uintptr) (r uintptr) {
 	pp := (*pageAlloc)(p)
 	systemstack(func() {
-		r = pp.scavenge(nbytes, nil)
+		r = pp.scavenge(nbytes, nil, true)
 	})
 	return
 }
@@ -971,9 +995,8 @@ func NewPageAlloc(chunks, scav map[ChunkIdx][]BitRange) *PageAlloc {
 	p := new(pageAlloc)
 
 	// We've got an entry, so initialize the pageAlloc.
-	p.init(new(mutex), testSysStat)
+	p.init(new(mutex), testSysStat, true)
 	lockInit(p.mheapLock, lockRankMheap)
-	p.test = true
 	for i, init := range chunks {
 		addr := chunkBase(chunkIdx(i))
 
@@ -985,10 +1008,17 @@ func NewPageAlloc(chunks, scav map[ChunkIdx][]BitRange) *PageAlloc {
 		})
 
 		// Initialize the bitmap and update pageAlloc metadata.
-		chunk := p.chunkOf(chunkIndex(addr))
+		ci := chunkIndex(addr)
+		chunk := p.chunkOf(ci)
 
 		// Clear all the scavenged bits which grow set.
 		chunk.scavenged.clearRange(0, pallocChunkPages)
+
+		// Simulate the allocation and subsequent free of all pages in
+		// the chunk for the scavenge index. This sets the state equivalent
+		// with all pages within the index being free.
+		p.scav.index.alloc(ci, pallocChunkPages)
+		p.scav.index.free(ci, 0, pallocChunkPages)
 
 		// Apply scavenge state if applicable.
 		if scav != nil {
@@ -1009,19 +1039,10 @@ func NewPageAlloc(chunks, scav map[ChunkIdx][]BitRange) *PageAlloc {
 			// it and it's a no-op anyway.
 			if s.N != 0 {
 				chunk.allocRange(s.I, s.N)
-			}
-		}
 
-		// Make sure the scavenge index is updated.
-		//
-		// This is an inefficient way to do it, but it's also the simplest way.
-		minPages := physPageSize / pageSize
-		if minPages < 1 {
-			minPages = 1
-		}
-		_, npages := chunk.findScavengeCandidate(pallocChunkPages-1, minPages, minPages)
-		if npages != 0 {
-			p.scav.index.mark(addr, addr+pallocChunkBytes)
+				// Make sure the scavenge index is updated.
+				p.scav.index.alloc(ci, s.N)
+			}
 		}
 
 		// Update heap metadata for the allocRange calls above.
@@ -1046,8 +1067,6 @@ func FreePageAlloc(pp *PageAlloc) {
 		for l := 0; l < summaryLevels; l++ {
 			sysFreeOS(unsafe.Pointer(&p.summary[l][0]), uintptr(cap(p.summary[l]))*pallocSumBytes)
 		}
-		// Only necessary on 64-bit. This is a global on 32-bit.
-		sysFreeOS(unsafe.Pointer(&p.scav.index.chunks[0]), uintptr(cap(p.scav.index.chunks)))
 	} else {
 		resSize := uintptr(0)
 		for _, s := range p.summary {
@@ -1055,6 +1074,9 @@ func FreePageAlloc(pp *PageAlloc) {
 		}
 		sysFreeOS(unsafe.Pointer(&p.summary[0][0]), alignUp(resSize, physPageSize))
 	}
+
+	// Free extra data structures.
+	sysFreeOS(unsafe.Pointer(&p.scav.index.chunks[0]), uintptr(cap(p.scav.index.chunks))*unsafe.Sizeof(atomicScavChunkData{}))
 
 	// Subtract back out whatever we mapped for the summaries.
 	// sysUsed adds to p.sysStat and memstats.mappedReady no matter what
@@ -1605,23 +1627,181 @@ type ScavengeIndex struct {
 
 func NewScavengeIndex(min, max ChunkIdx) *ScavengeIndex {
 	s := new(ScavengeIndex)
-	s.i.chunks = make([]atomic.Uint8, uintptr(1<<heapAddrBits/pallocChunkBytes/8))
-	s.i.min.Store(int32(min / 8))
-	s.i.max.Store(int32(max / 8))
+	// This is a bit lazy but we easily guarantee we'll be able
+	// to reference all the relevant chunks. The worst-case
+	// memory usage here is 512 MiB, but tests generally use
+	// small offsets from BaseChunkIdx, which results in ~100s
+	// of KiB in memory use.
+	//
+	// This may still be worth making better, at least by sharing
+	// this fairly large array across calls with a sync.Pool or
+	// something. Currently, when the tests are run serially,
+	// it takes around 0.5s. Not all that much, but if we have
+	// a lot of tests like this it could add up.
+	s.i.chunks = make([]atomicScavChunkData, max)
+	s.i.min.Store(uintptr(min))
+	s.i.max.Store(uintptr(max))
+	s.i.minHeapIdx.Store(uintptr(min))
+	s.i.test = true
 	return s
 }
 
-func (s *ScavengeIndex) Find() (ChunkIdx, uint) {
-	ci, off := s.i.find()
+func (s *ScavengeIndex) Find(force bool) (ChunkIdx, uint) {
+	ci, off := s.i.find(force)
 	return ChunkIdx(ci), off
 }
 
-func (s *ScavengeIndex) Mark(base, limit uintptr) {
-	s.i.mark(base, limit)
+func (s *ScavengeIndex) AllocRange(base, limit uintptr) {
+	sc, ec := chunkIndex(base), chunkIndex(limit-1)
+	si, ei := chunkPageIndex(base), chunkPageIndex(limit-1)
+
+	if sc == ec {
+		// The range doesn't cross any chunk boundaries.
+		s.i.alloc(sc, ei+1-si)
+	} else {
+		// The range crosses at least one chunk boundary.
+		s.i.alloc(sc, pallocChunkPages-si)
+		for c := sc + 1; c < ec; c++ {
+			s.i.alloc(c, pallocChunkPages)
+		}
+		s.i.alloc(ec, ei+1)
+	}
 }
 
-func (s *ScavengeIndex) Clear(ci ChunkIdx) {
-	s.i.clear(chunkIdx(ci))
+func (s *ScavengeIndex) FreeRange(base, limit uintptr) {
+	sc, ec := chunkIndex(base), chunkIndex(limit-1)
+	si, ei := chunkPageIndex(base), chunkPageIndex(limit-1)
+
+	if sc == ec {
+		// The range doesn't cross any chunk boundaries.
+		s.i.free(sc, si, ei+1-si)
+	} else {
+		// The range crosses at least one chunk boundary.
+		s.i.free(sc, si, pallocChunkPages-si)
+		for c := sc + 1; c < ec; c++ {
+			s.i.free(c, 0, pallocChunkPages)
+		}
+		s.i.free(ec, 0, ei+1)
+	}
+}
+
+func (s *ScavengeIndex) ResetSearchAddrs() {
+	for _, a := range []*atomicOffAddr{&s.i.searchAddrBg, &s.i.searchAddrForce} {
+		addr, marked := a.Load()
+		if marked {
+			a.StoreUnmark(addr, addr)
+		}
+		a.Clear()
+	}
+	s.i.freeHWM = minOffAddr
+}
+
+func (s *ScavengeIndex) NextGen() {
+	s.i.nextGen()
+}
+
+func (s *ScavengeIndex) SetEmpty(ci ChunkIdx) {
+	s.i.setEmpty(chunkIdx(ci))
+}
+
+func (s *ScavengeIndex) SetNoHugePage(ci ChunkIdx) bool {
+	return s.i.setNoHugePage(chunkIdx(ci))
+}
+
+func CheckPackScavChunkData(gen uint32, inUse, lastInUse uint16, flags uint8) bool {
+	sc0 := scavChunkData{
+		gen:            gen,
+		inUse:          inUse,
+		lastInUse:      lastInUse,
+		scavChunkFlags: scavChunkFlags(flags),
+	}
+	scp := sc0.pack()
+	sc1 := unpackScavChunkData(scp)
+	return sc0 == sc1
 }
 
 const GTrackingPeriod = gTrackingPeriod
+
+var ZeroBase = unsafe.Pointer(&zerobase)
+
+const UserArenaChunkBytes = userArenaChunkBytes
+
+type UserArena struct {
+	arena *userArena
+}
+
+func NewUserArena() *UserArena {
+	return &UserArena{newUserArena()}
+}
+
+func (a *UserArena) New(out *any) {
+	i := efaceOf(out)
+	typ := i._type
+	if typ.kind&kindMask != kindPtr {
+		panic("new result of non-ptr type")
+	}
+	typ = (*ptrtype)(unsafe.Pointer(typ)).elem
+	i.data = a.arena.new(typ)
+}
+
+func (a *UserArena) Slice(sl any, cap int) {
+	a.arena.slice(sl, cap)
+}
+
+func (a *UserArena) Free() {
+	a.arena.free()
+}
+
+func GlobalWaitingArenaChunks() int {
+	n := 0
+	systemstack(func() {
+		lock(&mheap_.lock)
+		for s := mheap_.userArena.quarantineList.first; s != nil; s = s.next {
+			n++
+		}
+		unlock(&mheap_.lock)
+	})
+	return n
+}
+
+func UserArenaClone[T any](s T) T {
+	return arena_heapify(s).(T)
+}
+
+var AlignUp = alignUp
+
+// BlockUntilEmptyFinalizerQueue blocks until either the finalizer
+// queue is emptied (and the finalizers have executed) or the timeout
+// is reached. Returns true if the finalizer queue was emptied.
+func BlockUntilEmptyFinalizerQueue(timeout int64) bool {
+	start := nanotime()
+	for nanotime()-start < timeout {
+		lock(&finlock)
+		// We know the queue has been drained when both finq is nil
+		// and the finalizer g has stopped executing.
+		empty := finq == nil
+		empty = empty && readgstatus(fing) == _Gwaiting && fing.waitreason == waitReasonFinalizerWait
+		unlock(&finlock)
+		if empty {
+			return true
+		}
+		Gosched()
+	}
+	return false
+}
+
+func FrameStartLine(f *Frame) int {
+	return f.startLine
+}
+
+// PersistentAlloc allocates some memory that lives outside the Go heap.
+// This memory will never be freed; use sparingly.
+func PersistentAlloc(n uintptr) unsafe.Pointer {
+	return persistentalloc(n, 0, &memstats.other_sys)
+}
+
+// FPCallers works like Callers and uses frame pointer unwinding to populate
+// pcBuf with the return addresses of the physical frames on the stack.
+func FPCallers(skip int, pcBuf []uintptr) int {
+	return fpTracebackPCs(unsafe.Pointer(getcallerfp()), skip, pcBuf)
+}

@@ -37,7 +37,9 @@ import (
 	"cmd/internal/objabi"
 	"cmd/internal/src"
 	"cmd/internal/sys"
+	"encoding/binary"
 	"fmt"
+	"internal/abi"
 	"sync"
 	"sync/atomic"
 )
@@ -319,7 +321,7 @@ type Prog struct {
 	Isize    uint8     // for x86 back end: size of the instruction in bytes
 }
 
-// Pos indicates whether the oprand is the source or the destination.
+// AddrPos indicates whether the operand is the source or the destination.
 type AddrPos struct {
 	Addr
 	Pos OperandPos
@@ -463,7 +465,7 @@ type LSym struct {
 	P      []byte
 	R      []Reloc
 
-	Extra *interface{} // *FuncInfo or *FileInfo, if present
+	Extra *interface{} // *FuncInfo, *VarInfo, or *FileInfo, if present
 
 	Pkg    string
 	PkgIdx int32
@@ -472,16 +474,17 @@ type LSym struct {
 
 // A FuncInfo contains extra fields for STEXT symbols.
 type FuncInfo struct {
-	Args     int32
-	Locals   int32
-	Align    int32
-	FuncID   objabi.FuncID
-	FuncFlag objabi.FuncFlag
-	Text     *Prog
-	Autot    map[*LSym]struct{}
-	Pcln     Pcln
-	InlMarks []InlMark
-	spills   []RegSpill
+	Args      int32
+	Locals    int32
+	Align     int32
+	FuncID    abi.FuncID
+	FuncFlag  abi.FuncFlag
+	StartLine int32
+	Text      *Prog
+	Autot     map[*LSym]struct{}
+	Pcln      Pcln
+	InlMarks  []InlMark
+	spills    []RegSpill
 
 	dwarfInfoSym       *LSym
 	dwarfLocSym        *LSym
@@ -498,7 +501,11 @@ type FuncInfo struct {
 	WrapInfo           *LSym // for wrapper, info of wrapped function
 	JumpTables         []JumpTable
 
-	FuncInfoSym *LSym
+	FuncInfoSym   *LSym
+	WasmImportSym *LSym
+	WasmImport    *WasmImport
+
+	sehUnwindInfoSym *LSym
 }
 
 // JumpTable represents a table used for implementing multi-way
@@ -530,6 +537,30 @@ func (s *LSym) Func() *FuncInfo {
 	return f
 }
 
+type VarInfo struct {
+	dwarfInfoSym *LSym
+}
+
+// NewVarInfo allocates and returns a VarInfo for LSym.
+func (s *LSym) NewVarInfo() *VarInfo {
+	if s.Extra != nil {
+		panic(fmt.Sprintf("invalid use of LSym - NewVarInfo with Extra of type %T", *s.Extra))
+	}
+	f := new(VarInfo)
+	s.Extra = new(interface{})
+	*s.Extra = f
+	return f
+}
+
+// VarInfo returns the *VarInfo associated with s, or else nil.
+func (s *LSym) VarInfo() *VarInfo {
+	if s.Extra == nil {
+		return nil
+	}
+	f, _ := (*s.Extra).(*VarInfo)
+	return f
+}
+
 // A FileInfo contains extra fields for SDATA symbols backed by files.
 // (If LSym.Extra is a *FileInfo, LSym.P == nil.)
 type FileInfo struct {
@@ -556,6 +587,75 @@ func (s *LSym) File() *FileInfo {
 	f, _ := (*s.Extra).(*FileInfo)
 	return f
 }
+
+// WasmImport represents a WebAssembly (WASM) imported function with
+// parameters and results translated into WASM types based on the Go function
+// declaration.
+type WasmImport struct {
+	// Module holds the WASM module name specified by the //go:wasmimport
+	// directive.
+	Module string
+	// Name holds the WASM imported function name specified by the
+	// //go:wasmimport directive.
+	Name string
+	// Params holds the imported function parameter fields.
+	Params []WasmField
+	// Results holds the imported function result fields.
+	Results []WasmField
+}
+
+func (wi *WasmImport) CreateSym(ctxt *Link) *LSym {
+	var sym LSym
+
+	var b [8]byte
+	writeByte := func(x byte) {
+		sym.WriteBytes(ctxt, sym.Size, []byte{x})
+	}
+	writeUint32 := func(x uint32) {
+		binary.LittleEndian.PutUint32(b[:], x)
+		sym.WriteBytes(ctxt, sym.Size, b[:4])
+	}
+	writeInt64 := func(x int64) {
+		binary.LittleEndian.PutUint64(b[:], uint64(x))
+		sym.WriteBytes(ctxt, sym.Size, b[:])
+	}
+	writeString := func(s string) {
+		writeUint32(uint32(len(s)))
+		sym.WriteString(ctxt, sym.Size, len(s), s)
+	}
+	writeString(wi.Module)
+	writeString(wi.Name)
+	writeUint32(uint32(len(wi.Params)))
+	for _, f := range wi.Params {
+		writeByte(byte(f.Type))
+		writeInt64(f.Offset)
+	}
+	writeUint32(uint32(len(wi.Results)))
+	for _, f := range wi.Results {
+		writeByte(byte(f.Type))
+		writeInt64(f.Offset)
+	}
+
+	return &sym
+}
+
+type WasmField struct {
+	Type WasmFieldType
+	// Offset holds the frame-pointer-relative locations for Go's stack-based
+	// ABI. This is used by the src/cmd/internal/wasm package to map WASM
+	// import parameters to the Go stack in a wrapper function.
+	Offset int64
+}
+
+type WasmFieldType byte
+
+const (
+	WasmI32 WasmFieldType = iota
+	WasmI64
+	WasmF32
+	WasmF64
+	WasmPtr
+)
 
 type InlMark struct {
 	// When unwinding from an instruction in an inlined body, mark
@@ -723,6 +823,9 @@ const (
 	// IsPcdata indicates this is a pcdata symbol.
 	AttrPcdata
 
+	// PkgInit indicates this is a compiler-generated package init func.
+	AttrPkgInit
+
 	// attrABIBase is the value at which the ABI is encoded in
 	// Attribute. This must be last; all bits after this are
 	// assumed to be an ABI value.
@@ -751,6 +854,7 @@ func (a *Attribute) UsedInIface() bool        { return a.load()&AttrUsedInIface 
 func (a *Attribute) ContentAddressable() bool { return a.load()&AttrContentAddressable != 0 }
 func (a *Attribute) ABIWrapper() bool         { return a.load()&AttrABIWrapper != 0 }
 func (a *Attribute) IsPcdata() bool           { return a.load()&AttrPcdata != 0 }
+func (a *Attribute) IsPkgInit() bool          { return a.load()&AttrPkgInit != 0 }
 
 func (a *Attribute) Set(flag Attribute, value bool) {
 	for {
@@ -799,6 +903,7 @@ var textAttrStrings = [...]struct {
 	{bit: AttrIndexed, s: ""},
 	{bit: AttrContentAddressable, s: ""},
 	{bit: AttrABIWrapper, s: "ABIWRAPPER"},
+	{bit: AttrPkgInit, s: "PKGINIT"},
 }
 
 // String formats a for printing in as part of a TEXT prog.
@@ -831,7 +936,7 @@ func (a Attribute) String() string {
 // TextAttrString formats the symbol attributes for printing in as part of a TEXT prog.
 func (s *LSym) TextAttrString() string {
 	attr := s.Attribute.String()
-	if s.Func().FuncFlag&objabi.FuncFlag_TOPFRAME != 0 {
+	if s.Func().FuncFlag&abi.FuncFlagTopFrame != 0 {
 		if attr != "" {
 			attr += "|"
 		}
@@ -915,7 +1020,7 @@ type Link struct {
 	Imports            []goobj.ImportedPkg
 	DiagFunc           func(string, ...interface{})
 	DiagFlush          func()
-	DebugInfo          func(fn *LSym, info *LSym, curfn interface{}) ([]dwarf.Scope, dwarf.InlCalls) // if non-nil, curfn is a *gc.Node
+	DebugInfo          func(fn *LSym, info *LSym, curfn interface{}) ([]dwarf.Scope, dwarf.InlCalls, src.XPos) // if non-nil, curfn is a *ir.Func
 	GenAbstractFunc    func(fn *LSym)
 	Errors             int
 
@@ -994,6 +1099,7 @@ type LinkArch struct {
 	Preprocess     func(*Link, *LSym, ProgAlloc)
 	Assemble       func(*Link, *LSym, ProgAlloc)
 	Progedit       func(*Link, *Prog, ProgAlloc)
+	SEH            func(*Link, *LSym) *LSym
 	UnaryDst       map[As]bool // Instruction takes one operand, a destination.
 	DWARFRegisters map[int16]int16
 }

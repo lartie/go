@@ -34,7 +34,7 @@ type afield struct {
 // a map from entry format ids to their descriptions
 type abbrevTable map[uint32]abbrev
 
-// ParseAbbrev returns the abbreviation table that starts at byte off
+// parseAbbrev returns the abbreviation table that starts at byte off
 // in the .debug_abbrev section.
 func (d *Data) parseAbbrev(off uint64, vers int) (abbrevTable, error) {
 	if m, ok := d.abbrevCache[off]; ok {
@@ -975,8 +975,11 @@ func (r *Reader) SeekPC(pc uint64) (*Entry, error) {
 		u := &r.d.unit[unit]
 		r.b = makeBuf(r.d, u, "info", u.off, u.data)
 		e, err := r.Next()
-		if err != nil || e == nil || e.Tag == 0 {
+		if err != nil {
 			return nil, err
+		}
+		if e == nil || e.Tag == 0 {
+			return nil, ErrUnknownPC
 		}
 		ranges, err := r.d.Ranges(e)
 		if err != nil {

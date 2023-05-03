@@ -53,6 +53,9 @@ func setupTextLSym(f *Func, flag int) {
 	if f.ReflectMethod() {
 		flag |= obj.REFLECTMETHOD
 	}
+	if f.IsPackageInit() {
+		flag |= obj.PKGINIT
+	}
 
 	// Clumsy but important.
 	// For functions that could be on the path of invoking a deferred
@@ -74,5 +77,5 @@ func setupTextLSym(f *Func, flag int) {
 		}
 	}
 
-	base.Ctxt.InitTextSym(f.LSym, flag)
+	base.Ctxt.InitTextSym(f.LSym, flag, f.Pos())
 }

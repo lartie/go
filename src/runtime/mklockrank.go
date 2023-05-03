@@ -83,6 +83,9 @@ NONE
 < itab
 < reflectOffs;
 
+# User arena state
+NONE < userArenaState;
+
 # Tracing without a P uses a global trace buffer.
 scavenge
 # Above TRACEGLOBAL can emit a trace event without a P.
@@ -100,7 +103,8 @@ allg,
   notifyList,
   reflectOffs,
   timers,
-  traceStrings
+  traceStrings,
+  userArenaState
 # Above MALLOC are things that can allocate memory.
 < MALLOC
 # Below MALLOC is the malloc implementation.
@@ -175,6 +179,8 @@ NONE < panic;
 # deadlock is not acquired while holding panic, but it also needs to be
 # below all other locks.
 panic < deadlock;
+# raceFini is only held while exiting.
+panic < raceFini;
 `
 
 // cyclicRanks lists lock ranks that allow multiple locks of the same

@@ -46,7 +46,7 @@ TEXT runtime·exit(SB),NOSPLIT|NOFRAME,$0-4
 	SYSCALL
 	RET
 
-// func exitThread(wait *uint32)
+// func exitThread(wait *atomic.Uint32)
 TEXT runtime·exitThread(SB),NOSPLIT|NOFRAME,$0-8
 	MOVD	wait+0(FP), R1
 	// We're done using the stack.
@@ -410,9 +410,6 @@ TEXT runtime·sigfwd(SB),NOSPLIT,$0-32
 	MOVD	ctx+24(FP), R4
 	MOVD	fn+0(FP), R5
 	BL	R5
-	RET
-
-TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
 	RET
 
 TEXT runtime·sigtramp(SB),NOSPLIT|TOPFRAME,$64

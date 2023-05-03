@@ -39,10 +39,14 @@ import (
 	"debug/elf"
 	"encoding/binary"
 	"fmt"
+	"internal/buildcfg"
 	"log"
 	"strconv"
 	"strings"
 )
+
+// The build configuration supports PC-relative instructions and relocations (limited to tested targets).
+var hasPCrel = buildcfg.GOPPC64 >= 10 && buildcfg.GOOS == "linux"
 
 func genpltstub(ctxt *ld.Link, ldr *loader.Loader, r loader.Reloc, s loader.Sym) (sym loader.Sym, firstUse bool) {
 	// The ppc64 ABI PLT has similar concepts to other
@@ -133,7 +137,7 @@ func genpltstub(ctxt *ld.Link, ldr *loader.Loader, r loader.Reloc, s loader.Sym)
 	return stub.Sym(), firstUse
 }
 
-// Scan relocs and generate PLT stubs and generate/fixup ABI defined functions created by the linker
+// Scan relocs and generate PLT stubs and generate/fixup ABI defined functions created by the linker.
 func genstubs(ctxt *ld.Link, ldr *loader.Loader) {
 	var stubs []loader.Sym
 	var abifuncs []loader.Sym
@@ -185,7 +189,11 @@ func genstubs(ctxt *ld.Link, ldr *loader.Loader) {
 
 					// Turn this reloc into an R_CALLPOWER, and convert the TOC restore into a nop.
 					su.SetRelocType(i, objabi.R_CALLPOWER)
-					su.SetRelocAdd(i, r.Add()+int64(ldr.SymLocalentry(r.Sym())))
+					localEoffset := int64(ldr.SymLocalentry(r.Sym()))
+					if localEoffset == 1 {
+						ldr.Errorf(s, "Unsupported NOTOC call to %s", ldr.SymName(r.Sym()))
+					}
+					su.SetRelocAdd(i, r.Add()+localEoffset)
 					r.SetSiz(4)
 					rewritetonop(&ctxt.Target, ldr, su, int64(r.Off()+4), 0xFFFFFFFF, OP_TOCRESTORE)
 				}
@@ -215,20 +223,23 @@ func genaddmoduledata(ctxt *ld.Link, ldr *loader.Loader) {
 		initfunc.AddUint32(ctxt.Arch, op)
 	}
 
-	// addis r2, r12, .TOC.-func@ha
-	toc := ctxt.DotTOC[0]
-	rel1, _ := initfunc.AddRel(objabi.R_ADDRPOWER_PCREL)
-	rel1.SetOff(0)
-	rel1.SetSiz(8)
-	rel1.SetSym(toc)
-	o(0x3c4c0000)
-	// addi r2, r2, .TOC.-func@l
-	o(0x38420000)
-	// mflr r31
-	o(0x7c0802a6)
-	// stdu r31, -32(r1)
-	o(0xf801ffe1)
-	// addis r3, r2, local.moduledata@got@ha
+	// Write a function to load this module's local.moduledata. This is shared code.
+	//
+	// package link
+	// void addmoduledata() {
+	//	runtime.addmoduledata(local.moduledata)
+	// }
+
+	// Regenerate TOC from R12 (the address of this function).
+	sz := initfunc.AddSymRef(ctxt.Arch, ctxt.DotTOC[0], 0, objabi.R_ADDRPOWER_PCREL, 8)
+	initfunc.SetUint32(ctxt.Arch, sz-8, 0x3c4c0000) // addis r2, r12, .TOC.-func@ha
+	initfunc.SetUint32(ctxt.Arch, sz-4, 0x38420000) // addi r2, r2, .TOC.-func@l
+
+	// This is Go ABI. Stack a frame and save LR.
+	o(0x7c0802a6) // mflr r31
+	o(0xf801ffe1) // stdu r31, -32(r1)
+
+	// Get the moduledata pointer from GOT and put into R3.
 	var tgt loader.Sym
 	if s := ldr.Lookup("local.moduledata", 0); s != 0 {
 		tgt = s
@@ -237,29 +248,29 @@ func genaddmoduledata(ctxt *ld.Link, ldr *loader.Loader) {
 	} else {
 		tgt = ldr.LookupOrCreateSym("runtime.firstmoduledata", 0)
 	}
-	rel2, _ := initfunc.AddRel(objabi.R_ADDRPOWER_GOT)
-	rel2.SetOff(int32(initfunc.Size()))
-	rel2.SetSiz(8)
-	rel2.SetSym(tgt)
-	o(0x3c620000)
-	// ld r3, local.moduledata@got@l(r3)
-	o(0xe8630000)
-	// bl runtime.addmoduledata
-	rel3, _ := initfunc.AddRel(objabi.R_CALLPOWER)
-	rel3.SetOff(int32(initfunc.Size()))
-	rel3.SetSiz(4)
-	rel3.SetSym(addmoduledata)
-	o(0x48000001)
-	// nop
-	o(0x60000000)
-	// ld r31, 0(r1)
-	o(0xe8010000)
-	// mtlr r31
-	o(0x7c0803a6)
-	// addi r1,r1,32
-	o(0x38210020)
-	// blr
-	o(0x4e800020)
+
+	if !hasPCrel {
+		sz = initfunc.AddSymRef(ctxt.Arch, tgt, 0, objabi.R_ADDRPOWER_GOT, 8)
+		initfunc.SetUint32(ctxt.Arch, sz-8, 0x3c620000) // addis r3, r2, local.moduledata@got@ha
+		initfunc.SetUint32(ctxt.Arch, sz-4, 0xe8630000) // ld r3, local.moduledata@got@l(r3)
+	} else {
+		sz = initfunc.AddSymRef(ctxt.Arch, tgt, 0, objabi.R_ADDRPOWER_GOT_PCREL34, 8)
+		// Note, this is prefixed instruction. It must not cross a 64B boundary.
+		// It is doubleworld aligned here, so it will never cross (this function is 16B aligned, minimum).
+		initfunc.SetUint32(ctxt.Arch, sz-8, 0x04100000)
+		initfunc.SetUint32(ctxt.Arch, sz-4, 0xe4600000) // pld r3, local.moduledata@got@pcrel
+	}
+
+	// Call runtime.addmoduledata
+	sz = initfunc.AddSymRef(ctxt.Arch, addmoduledata, 0, objabi.R_CALLPOWER, 4)
+	initfunc.SetUint32(ctxt.Arch, sz-4, 0x48000001) // bl runtime.addmoduledata
+	o(0x60000000)                                   // nop (for TOC restore)
+
+	// Pop stack frame and return.
+	o(0xe8010000) // ld r31, 0(r1)
+	o(0x7c0803a6) // mtlr r31
+	o(0x38210020) // addi r1,r1,32
+	o(0x4e800020) // blr
 }
 
 // Rewrite ELF (v1 or v2) calls to _savegpr0_n, _savegpr1_n, _savefpr_n, _restfpr_n, _savevr_m, or
@@ -428,7 +439,11 @@ func addelfdynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s lo
 		// callee. Hence, we need to go to the local entry
 		// point.  (If we don't do this, the callee will try
 		// to use r12 to compute r2.)
-		su.SetRelocAdd(rIdx, r.Add()+int64(ldr.SymLocalentry(targ)))
+		localEoffset := int64(ldr.SymLocalentry(targ))
+		if localEoffset == 1 {
+			ldr.Errorf(s, "Unsupported NOTOC call to %s", targ)
+		}
+		su.SetRelocAdd(rIdx, r.Add()+localEoffset)
 
 		if targType == sym.SDYNIMPORT {
 			// Should have been handled in elfsetupplt
@@ -704,7 +719,7 @@ func xcoffreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sy
 }
 
 func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, ri int, sectoff int64) bool {
-	// Beware that bit0~bit15 start from the third byte of a instruction in Big-Endian machines.
+	// Beware that bit0~bit15 start from the third byte of an instruction in Big-Endian machines.
 	rt := r.Type
 	if rt == objabi.R_ADDR || rt == objabi.R_POWER_TLS || rt == objabi.R_CALLPOWER {
 	} else {
@@ -727,6 +742,10 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 		default:
 			return false
 		}
+	case objabi.R_ADDRPOWER_D34:
+		out.Write64(uint64(elf.R_PPC64_D34) | uint64(elfsym)<<32)
+	case objabi.R_ADDRPOWER_PCREL34:
+		out.Write64(uint64(elf.R_PPC64_PCREL34) | uint64(elfsym)<<32)
 	case objabi.R_POWER_TLS:
 		out.Write64(uint64(elf.R_PPC64_TLS) | uint64(elfsym)<<32)
 	case objabi.R_POWER_TLS_LE:
@@ -734,6 +753,10 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 		out.Write64(uint64(r.Xadd))
 		out.Write64(uint64(sectoff + 4))
 		out.Write64(uint64(elf.R_PPC64_TPREL16_LO) | uint64(elfsym)<<32)
+	case objabi.R_POWER_TLS_LE_TPREL34:
+		out.Write64(uint64(elf.R_PPC64_TPREL34) | uint64(elfsym)<<32)
+	case objabi.R_POWER_TLS_IE_PCREL34:
+		out.Write64(uint64(elf.R_PPC64_GOT_TPREL_PCREL34) | uint64(elfsym)<<32)
 	case objabi.R_POWER_TLS_IE:
 		out.Write64(uint64(elf.R_PPC64_GOT_TPREL16_HA) | uint64(elfsym)<<32)
 		out.Write64(uint64(r.Xadd))
@@ -754,6 +777,8 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 		out.Write64(uint64(r.Xadd))
 		out.Write64(uint64(sectoff + 4))
 		out.Write64(uint64(elf.R_PPC64_GOT16_LO_DS) | uint64(elfsym)<<32)
+	case objabi.R_ADDRPOWER_GOT_PCREL34:
+		out.Write64(uint64(elf.R_PPC64_GOT_PCREL34) | uint64(elfsym)<<32)
 	case objabi.R_ADDRPOWER_PCREL:
 		out.Write64(uint64(elf.R_PPC64_REL16_HA) | uint64(elfsym)<<32)
 		out.Write64(uint64(r.Xadd))
@@ -888,51 +913,44 @@ func archrelocaddr(ldr *loader.Loader, target *ld.Target, syms *ld.ArchSyms, r l
 	if target.IsAIX() {
 		ldr.Errorf(s, "archrelocaddr called for %s relocation\n", ldr.SymName(rs))
 	}
-	var o1, o2 uint32
-	if target.IsBigEndian() {
-		o1 = uint32(val >> 32)
-		o2 = uint32(val)
-	} else {
-		o1 = uint32(val)
-		o2 = uint32(val >> 32)
-	}
+	o1, o2 := unpackInstPair(target, val)
 
-	// We are spreading a 31-bit address across two instructions, putting the
-	// high (adjusted) part in the low 16 bits of the first instruction and the
-	// low part in the low 16 bits of the second instruction, or, in the DS case,
-	// bits 15-2 (inclusive) of the address into bits 15-2 of the second
-	// instruction (it is an error in this case if the low 2 bits of the address
-	// are non-zero).
-
+	// Verify resulting address fits within a 31 bit (2GB) address space.
+	// This is a restriction arising  from the usage of lis (HA) + d-form
+	// (LO) instruction sequences used to implement absolute relocations
+	// on PPC64 prior to ISA 3.1 (P10). For consistency, maintain this
+	// restriction for ISA 3.1 unless it becomes problematic.
 	t := ldr.SymAddr(rs) + r.Add()
 	if t < 0 || t >= 1<<31 {
 		ldr.Errorf(s, "relocation for %s is too big (>=2G): 0x%x", ldr.SymName(s), ldr.SymValue(rs))
 	}
-	if t&0x8000 != 0 {
-		t += 0x10000
-	}
 
 	switch r.Type() {
+	case objabi.R_ADDRPOWER_PCREL34:
+		// S + A - P
+		t -= (ldr.SymValue(s) + int64(r.Off()))
+		o1 |= computePrefix34HI(t)
+		o2 |= computeLO(int32(t))
+	case objabi.R_ADDRPOWER_D34:
+		o1 |= computePrefix34HI(t)
+		o2 |= computeLO(int32(t))
 	case objabi.R_ADDRPOWER:
-		o1 |= (uint32(t) >> 16) & 0xffff
-		o2 |= uint32(t) & 0xffff
+		o1 |= computeHA(int32(t))
+		o2 |= computeLO(int32(t))
 	case objabi.R_ADDRPOWER_DS:
-		o1 |= (uint32(t) >> 16) & 0xffff
+		o1 |= computeHA(int32(t))
+		o2 |= computeLO(int32(t))
 		if t&3 != 0 {
 			ldr.Errorf(s, "bad DS reloc for %s: %d", ldr.SymName(s), ldr.SymValue(rs))
 		}
-		o2 |= uint32(t) & 0xfffc
 	default:
 		return -1
 	}
 
-	if target.IsBigEndian() {
-		return int64(o1)<<32 | int64(o2)
-	}
-	return int64(o2)<<32 | int64(o1)
+	return packInstPair(target, o1, o2)
 }
 
-// Determine if the code was compiled so that the TOC register R2 is initialized and maintained
+// Determine if the code was compiled so that the TOC register R2 is initialized and maintained.
 func r2Valid(ctxt *ld.Link) bool {
 	switch ctxt.BuildMode {
 	case ld.BuildModeCArchive, ld.BuildModeCShared, ld.BuildModePIE, ld.BuildModeShared, ld.BuildModePlugin:
@@ -942,7 +960,7 @@ func r2Valid(ctxt *ld.Link) bool {
 	return ctxt.IsSharedGoLink()
 }
 
-// resolve direct jump relocation r in s, and add trampoline if necessary
+// resolve direct jump relocation r in s, and add trampoline if necessary.
 func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 
 	// Trampolines are created if the branch offset is too large and the linker cannot insert a call stub to handle it.
@@ -993,8 +1011,9 @@ func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 				if ldr.SymValue(tramp) == 0 {
 					break
 				}
-
-				t = ldr.SymValue(tramp) + r.Add() - (ldr.SymValue(s) + int64(r.Off()))
+				// Note, the trampoline is always called directly. The addend of the original relocation is accounted for in the
+				// trampoline itself.
+				t = ldr.SymValue(tramp) - (ldr.SymValue(s) + int64(r.Off()))
 
 				// With internal linking, the trampoline can be used if it is not too far.
 				// With external linking, the trampoline must be in this section for it to be reused.
@@ -1023,6 +1042,13 @@ func gentramp(ctxt *ld.Link, ldr *loader.Loader, tramp *loader.SymbolBuilder, ta
 	P := make([]byte, tramp.Size())
 	var o1, o2 uint32
 
+	// ELFv2 save/restore functions use R0/R12 in special ways, therefore trampolines
+	// as generated here will not always work correctly.
+	if strings.HasPrefix(ldr.SymName(target), "runtime.elf_") {
+		log.Fatalf("Internal linker does not support trampolines to ELFv2 ABI"+
+			" register save/restore function %s", ldr.SymName(target))
+	}
+
 	if ctxt.IsAIX() {
 		// On AIX, the address is retrieved with a TOC symbol.
 		// For internal linking, the "Linux" way might still be used.
@@ -1040,19 +1066,23 @@ func gentramp(ctxt *ld.Link, ldr *loader.Loader, tramp *loader.SymbolBuilder, ta
 		r.SetOff(0)
 		r.SetSiz(8) // generates 2 relocations: HA + LO
 		r.SetSym(toctramp.Sym())
+	} else if hasPCrel {
+		// pla r12, addr (PCrel). This works for static or PIC, with or without a valid TOC pointer.
+		o1 = uint32(0x06100000)
+		o2 = uint32(0x39800000) // pla r12, addr
+
+		// The trampoline's position is not known yet, insert a relocation.
+		r, _ := tramp.AddRel(objabi.R_ADDRPOWER_PCREL34)
+		r.SetOff(0)
+		r.SetSiz(8) // This spans 2 words.
+		r.SetSym(target)
+		r.SetAdd(offset)
 	} else {
 		// Used for default build mode for an executable
 		// Address of the call target is generated using
 		// relocation and doesn't depend on r2 (TOC).
 		o1 = uint32(0x3c000000) | 12<<21          // lis  r12,targetaddr hi
 		o2 = uint32(0x38000000) | 12<<21 | 12<<16 // addi r12,r12,targetaddr lo
-
-		// ELFv2 save/restore functions use R0/R12 in special ways, therefore trampolines
-		// as generated here will not always work correctly.
-		if strings.HasPrefix(ldr.SymName(target), "runtime.elf_") {
-			log.Fatalf("Internal linker does not support trampolines to ELFv2 ABI"+
-				" register save/restore function %s", ldr.SymName(target))
-		}
 
 		t := ldr.SymValue(target)
 		if t == 0 || r2Valid(ctxt) || ctxt.IsExternal() {
@@ -1084,6 +1114,61 @@ func gentramp(ctxt *ld.Link, ldr *loader.Loader, tramp *loader.SymbolBuilder, ta
 	tramp.SetData(P)
 }
 
+// Unpack a pair of 32 bit instruction words from
+// a 64 bit relocation into instN and instN+1 in endian order.
+func unpackInstPair(target *ld.Target, r int64) (uint32, uint32) {
+	if target.IsBigEndian() {
+		return uint32(r >> 32), uint32(r)
+	}
+	return uint32(r), uint32(r >> 32)
+}
+
+// Pack a pair of 32 bit instruction words o1, o2 into 64 bit relocation
+// in endian order.
+func packInstPair(target *ld.Target, o1, o2 uint32) int64 {
+	if target.IsBigEndian() {
+		return (int64(o1) << 32) | int64(o2)
+	}
+	return int64(o1) | (int64(o2) << 32)
+}
+
+// Compute the high-adjusted value (always a signed 32b value) per the ELF ABI.
+// The returned value is always 0 <= x <= 0xFFFF.
+func computeHA(val int32) uint32 {
+	return uint32(uint16((val + 0x8000) >> 16))
+}
+
+// Compute the low value (the lower 16 bits of any 32b value) per the ELF ABI.
+// The returned value is always 0 <= x <= 0xFFFF.
+func computeLO(val int32) uint32 {
+	return uint32(uint16(val))
+}
+
+// Compute the high 18 bits of a signed 34b constant. Used to pack the high 18 bits
+// of a prefix34 relocation field. This assumes the input is already restricted to
+// 34 bits.
+func computePrefix34HI(val int64) uint32 {
+	return uint32((val >> 16) & 0x3FFFF)
+}
+
+func computeTLSLEReloc(target *ld.Target, ldr *loader.Loader, rs, s loader.Sym) int64 {
+	// The thread pointer points 0x7000 bytes after the start of the
+	// thread local storage area as documented in section "3.7.2 TLS
+	// Runtime Handling" of "Power Architecture 64-Bit ELF V2 ABI
+	// Specification".
+	v := ldr.SymValue(rs) - 0x7000
+	if target.IsAIX() {
+		// On AIX, the thread pointer points 0x7800 bytes after
+		// the TLS.
+		v -= 0x800
+	}
+
+	if int64(int32(v)) != v {
+		ldr.Errorf(s, "TLS offset out of range %d", v)
+	}
+	return v
+}
+
 func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc, s loader.Sym, val int64) (relocatedOffset int64, nExtReloc int, ok bool) {
 	rs := r.Sym()
 	if target.IsExternal() {
@@ -1094,7 +1179,7 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 			if !target.IsAIX() {
 				return val, nExtReloc, false
 			}
-		case objabi.R_POWER_TLS:
+		case objabi.R_POWER_TLS, objabi.R_POWER_TLS_IE_PCREL34, objabi.R_POWER_TLS_LE_TPREL34, objabi.R_ADDRPOWER_GOT_PCREL34:
 			nExtReloc = 1
 			return val, nExtReloc, true
 		case objabi.R_POWER_TLS_LE, objabi.R_POWER_TLS_IE:
@@ -1125,7 +1210,7 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 			if !target.IsAIX() {
 				return val, nExtReloc, true
 			}
-		case objabi.R_CALLPOWER:
+		case objabi.R_CALLPOWER, objabi.R_ADDRPOWER_D34, objabi.R_ADDRPOWER_PCREL34:
 			nExtReloc = 1
 			if !target.IsAIX() {
 				return val, nExtReloc, true
@@ -1136,7 +1221,7 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 	switch r.Type() {
 	case objabi.R_ADDRPOWER_TOCREL, objabi.R_ADDRPOWER_TOCREL_DS:
 		return archreloctoc(ldr, target, syms, r, s, val), nExtReloc, true
-	case objabi.R_ADDRPOWER, objabi.R_ADDRPOWER_DS:
+	case objabi.R_ADDRPOWER, objabi.R_ADDRPOWER_DS, objabi.R_ADDRPOWER_D34, objabi.R_ADDRPOWER_PCREL34:
 		return archrelocaddr(ldr, target, syms, r, s, val), nExtReloc, true
 	case objabi.R_CALLPOWER:
 		// Bits 6 through 29 = (S + A - P) >> 2
@@ -1169,16 +1254,10 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 
 	case objabi.R_ADDRPOWER_PCREL: // S + A - P
 		t := ldr.SymValue(rs) + r.Add() - (ldr.SymValue(s) + int64(r.Off()))
-		ha := uint16(((t + 0x8000) >> 16) & 0xFFFF)
-		l := uint16(t)
-		if target.IsBigEndian() {
-			val |= int64(l)
-			val |= int64(ha) << 32
-		} else {
-			val |= int64(ha)
-			val |= int64(l) << 32
-		}
-		return val, nExtReloc, true
+		ha, l := unpackInstPair(target, val)
+		l |= computeLO(int32(t))
+		ha |= computeHA(int32(t))
+		return packInstPair(target, ha, l), nExtReloc, true
 
 	case objabi.R_POWER_TLS:
 		const OP_ADD = 31<<26 | 266<<1
@@ -1210,50 +1289,48 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 		const OP_ADDI = 14 << 26
 		const OP_MASK = 0x3F << 26
 		const OP_RA_MASK = 0x1F << 16
-		uval := uint64(val)
 		// convert r2 to r0, and ld to addi
-		if target.IsBigEndian() {
-			uval = uval &^ (OP_RA_MASK << 32)
-			uval = (uval &^ OP_MASK) | OP_ADDI
-		} else {
-			uval = uval &^ (OP_RA_MASK)
-			uval = (uval &^ (OP_MASK << 32)) | (OP_ADDI << 32)
-		}
-		val = int64(uval)
-		// Treat this like an R_POWER_TLS_LE relocation now.
+		mask := packInstPair(target, OP_RA_MASK, OP_MASK)
+		addi_op := packInstPair(target, 0, OP_ADDI)
+		val &^= mask
+		val |= addi_op
 		fallthrough
 
 	case objabi.R_POWER_TLS_LE:
-		// The thread pointer points 0x7000 bytes after the start of the
-		// thread local storage area as documented in section "3.7.2 TLS
-		// Runtime Handling" of "Power Architecture 64-Bit ELF V2 ABI
-		// Specification".
-		v := ldr.SymValue(rs) - 0x7000
-		if target.IsAIX() {
-			// On AIX, the thread pointer points 0x7800 bytes after
-			// the TLS.
-			v -= 0x800
+		v := computeTLSLEReloc(target, ldr, rs, s)
+		o1, o2 := unpackInstPair(target, val)
+		o1 |= computeHA(int32(v))
+		o2 |= computeLO(int32(v))
+		return packInstPair(target, o1, o2), nExtReloc, true
+
+	case objabi.R_POWER_TLS_IE_PCREL34:
+		// Convert TLS_IE relocation to TLS_LE if supported.
+		if !(target.IsPIE() && target.IsElf()) {
+			log.Fatalf("cannot handle R_POWER_TLS_IE (sym %s) when linking non-PIE, non-ELF binaries internally", ldr.SymName(s))
 		}
 
-		var o1, o2 uint32
-		if int64(int32(v)) != v {
-			ldr.Errorf(s, "TLS offset out of range %d", v)
-		}
-		if target.IsBigEndian() {
-			o1 = uint32(val >> 32)
-			o2 = uint32(val)
-		} else {
-			o1 = uint32(val)
-			o2 = uint32(val >> 32)
-		}
+		// We are an ELF binary, we can safely convert to TLS_LE_TPREL34 from:
+		// pld rX, x@got@tprel@pcrel
+		//
+		// to TLS_LE_TPREL32 by converting to:
+		// pla rX, x@tprel
 
-		o1 |= uint32(((v + 0x8000) >> 16) & 0xFFFF)
-		o2 |= uint32(v & 0xFFFF)
+		const OP_MASK_PFX = 0xFFFFFFFF        // Discard prefix word
+		const OP_MASK = (0x3F << 26) | 0xFFFF // Preserve RT, RA
+		const OP_PFX = 1<<26 | 2<<24
+		const OP_PLA = 14 << 26
+		mask := packInstPair(target, OP_MASK_PFX, OP_MASK)
+		pla_op := packInstPair(target, OP_PFX, OP_PLA)
+		val &^= mask
+		val |= pla_op
+		fallthrough
 
-		if target.IsBigEndian() {
-			return int64(o1)<<32 | int64(o2), nExtReloc, true
-		}
-		return int64(o2)<<32 | int64(o1), nExtReloc, true
+	case objabi.R_POWER_TLS_LE_TPREL34:
+		v := computeTLSLEReloc(target, ldr, rs, s)
+		o1, o2 := unpackInstPair(target, val)
+		o1 |= computePrefix34HI(v)
+		o2 |= computeLO(int32(v))
+		return packInstPair(target, o1, o2), nExtReloc, true
 	}
 
 	return val, nExtReloc, false
@@ -1354,14 +1431,17 @@ overflow:
 
 func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc, s loader.Sym) (loader.ExtReloc, bool) {
 	switch r.Type() {
-	case objabi.R_POWER_TLS, objabi.R_POWER_TLS_LE, objabi.R_POWER_TLS_IE, objabi.R_CALLPOWER:
+	case objabi.R_POWER_TLS, objabi.R_POWER_TLS_LE, objabi.R_POWER_TLS_IE, objabi.R_POWER_TLS_IE_PCREL34, objabi.R_POWER_TLS_LE_TPREL34, objabi.R_CALLPOWER:
 		return ld.ExtrelocSimple(ldr, r), true
 	case objabi.R_ADDRPOWER,
 		objabi.R_ADDRPOWER_DS,
 		objabi.R_ADDRPOWER_TOCREL,
 		objabi.R_ADDRPOWER_TOCREL_DS,
 		objabi.R_ADDRPOWER_GOT,
-		objabi.R_ADDRPOWER_PCREL:
+		objabi.R_ADDRPOWER_GOT_PCREL34,
+		objabi.R_ADDRPOWER_PCREL,
+		objabi.R_ADDRPOWER_D34,
+		objabi.R_ADDRPOWER_PCREL34:
 		return ld.ExtrelocViaOuterSym(ldr, r, s), true
 	}
 	return loader.ExtReloc{}, false
@@ -1411,7 +1491,7 @@ func addpltsym(ctxt *ld.Link, ldr *loader.Loader, s loader.Sym) {
 	}
 }
 
-// Generate the glink resolver stub if necessary and return the .glink section
+// Generate the glink resolver stub if necessary and return the .glink section.
 func ensureglinkresolver(ctxt *ld.Link, ldr *loader.Loader) *loader.SymbolBuilder {
 	glink := ldr.CreateSymForUpdate(".glink", 0)
 	if glink.Size() != 0 {
